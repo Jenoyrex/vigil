@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vigil}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vigil}
+      POSTGRES_DB: ${POSTGRES_DB:-vigil}
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - vigil_postgres_data:/var/lib/postgresql/data
+      - ./postgres/init-test-db.sh:/docker-entrypoint-initdb.d/init-test-db.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vigil} -d ${POSTGRES_DB:-vigil}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  vigil_postgres_data:
