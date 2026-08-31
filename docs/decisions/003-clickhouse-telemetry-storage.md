@@ -67,15 +67,15 @@ CREATE TABLE spans
     ),
     events_truncated      Bool DEFAULT false,
 
-    llm_provider          Nullable(LowCardinality(String)),
-    llm_model             Nullable(LowCardinality(String)),
+    llm_provider          LowCardinality(Nullable(String)),
+    llm_model             LowCardinality(Nullable(String)),
     llm_input_tokens      Nullable(UInt32),
     llm_output_tokens     Nullable(UInt32),
     llm_total_tokens      Nullable(UInt32),
     llm_cost_usd          Nullable(Decimal64(6)),
 
     environment           LowCardinality(String),
-    release               Nullable(LowCardinality(String)),
+    release               LowCardinality(Nullable(String)),
 
     ingested_at           DateTime64(3) DEFAULT now64(3)
 )
