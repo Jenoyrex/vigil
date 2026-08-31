@@ -11,6 +11,7 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "alembic>=1.13.0",
     "psycopg[binary]>=3.2.0",
+    "clickhouse-connect>=1.7.2",
 ]
 
 [dependency-groups]
@@ -46,6 +47,11 @@ select = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection pattern relies on `Depends(...)` as an
+# argument default; B008 otherwise flags every route/dependency signature.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Header", "fastapi.Query", "fastapi.Body"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,0 +1,33 @@
+{
+  "resource": {
+    "service.name": "checkout-service",
+    "sdk.name": "vigil-python",
+    "sdk.version": "0.1.0"
+  },
+  "spans": [
+    {
+      "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+      "span_id": "00f067aa0ba902b7",
+      "parent_span_id": null,
+      "name": "openai.chat.completion",
+      "span_type": "llm",
+      "start_time": "2026-08-31T12:00:00.000Z",
+      "end_time": "2026-08-31T12:00:01.250Z",
+      "status": "ok",
+      "input": { "messages": [{ "role": "user", "content": "Hello" }] },
+      "output": { "role": "assistant", "content": "Hi there!" },
+      "attributes": { "llm.request.temperature": 0.7 },
+      "events": [
+        { "time": "2026-08-31T12:00:00.500Z", "name": "first_token", "attributes": {} }
+      ],
+      "llm_provider": "openai",
+      "llm_model": "gpt-4o-mini",
+      "llm_input_tokens": 12,
+      "llm_output_tokens": 8,
+      "llm_total_tokens": 20,
+      "llm_cost_usd": 0.000123,
+      "environment": "development",
+      "release": "v0.1.0"
+    }
+  ]
+}
