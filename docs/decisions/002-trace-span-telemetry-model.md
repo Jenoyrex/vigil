@@ -102,12 +102,14 @@ support, or Redis. It documents the approved design only; implementation is sepa
    denormalized so the trace/span explorer never needs a live cross-database join to render).
 
 9. **Proposed ClickHouse partitioning/ordering** (for implementation when the ClickHouse schema is
-   built): `PARTITION BY toYYYYMM(start_time)` (event-time monthly partitions, enabling cheap
-   partition-drop retention and time-range pruning); `ORDER BY (project_id, toDate(start_time),
+   built): `PARTITION BY toDate(start_time)` (event-time daily partitions, enabling cheap
+   partition-drop retention and time-range pruning — revised from an originally-proposed monthly
+   partition by ADR 003, to align partition boundaries with the 30-day retention window so whole
+   partitions expire atomically); `ORDER BY (project_id, toDate(start_time),
    trace_id, span_id)` (tenant first for isolation and partition/granule pruning, date next for
    time-range pruning, `trace_id` next so all spans of one trace are physically colocated for fast
    single-trace reads, `span_id` last for uniqueness); TTL-based retention
-   (`TTL start_time + INTERVAL N DAY DELETE`) aligned to the monthly partitions so expiry is a
+   (`TTL start_time + INTERVAL N DAY DELETE`) aligned to the daily partitions so expiry is a
    cheap partition drop rather than a row-level `DELETE`.
 
 10. **Privacy/security posture for V1**: no automatic PII/secret redaction is implemented — `input`
@@ -178,7 +180,7 @@ support, or Redis. It documents the approved design only; implementation is sepa
 ## Consequences
 
 - Implementation of the ClickHouse `spans` table and `traces` materialized view must follow the
-  field set, partitioning (`PARTITION BY toYYYYMM(start_time)`), ordering
+  field set, partitioning (`PARTITION BY toDate(start_time)`, per ADR 003), ordering
   (`ORDER BY (project_id, toDate(start_time), trace_id, span_id)`), and `ReplacingMergeTree`
   engine choice documented here, unless a follow-up ADR revises them.
 - The ingestion API implementation must derive `project_id` from the authenticated API key and
