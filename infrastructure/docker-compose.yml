@@ -16,5 +16,24 @@ services:
       timeout: 5s
       retries: 10
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-vigil}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-vigil}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-vigil}
+    ports:
+      - "${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
+    volumes:
+      - vigil_clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   vigil_postgres_data:
+  vigil_clickhouse_data:
