@@ -1,7 +1,10 @@
 import os
 from collections.abc import Generator
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -42,3 +45,78 @@ def db_session() -> Generator[Session, None, None]:
     finally:
         session.close()
         _truncate_all()
+
+
+class FakeSpansRepository:
+    """In-memory stand-in for app.clickhouse.repository.SpansRepository.
+
+    Records every batch it receives (so tests can assert a single batch call
+    was made, not one insert per span) and can be told to raise, to exercise
+    the ingestion route's ClickHouse-failure handling without a real server.
+    """
+
+    def __init__(self) -> None:
+        self.batches: list[list[dict[str, Any]]] = []
+        self.fail_with: Exception | None = None
+
+    def insert_spans(self, rows: list[dict[str, Any]]) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.batches.append(rows)
+
+
+@pytest.fixture
+def fake_repository() -> FakeSpansRepository:
+    return FakeSpansRepository()
+
+
+@pytest.fixture
+def client(
+    db_session: Session, fake_repository: FakeSpansRepository
+) -> Generator[TestClient, None, None]:
+    """A TestClient wired to the test Postgres database and a fake ClickHouse
+    repository -- suitable for auth/validation/transformation tests that
+    should never touch a real ClickHouse server. See
+    test_traces_clickhouse_integration.py for the one test that does.
+    """
+    from app.api.v1.traces import get_spans_repository
+    from app.db.session import get_db
+    from app.main import app
+
+    def override_get_db() -> Generator[Session, None, None]:
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_spans_repository] = lambda: fake_repository
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def active_api_key(db_session: Session) -> SimpleNamespace:
+    """An active API key for a fresh org/project, plus its raw (unhashed) value."""
+    from app.security.api_keys import generate_api_key
+    from test_models import make_api_key, make_organization, make_project
+
+    org = make_organization(db_session)
+    project = make_project(db_session, org)
+    raw_key, key_prefix, key_hash = generate_api_key()
+    api_key = make_api_key(db_session, project, key_prefix=key_prefix, key_hash=key_hash)
+    return SimpleNamespace(raw_key=raw_key, organization=org, project=project, api_key=api_key)
+
+
+@pytest.fixture
+def revoked_api_key(db_session: Session) -> SimpleNamespace:
+    from app.security.api_keys import generate_api_key
+    from test_models import make_api_key, make_organization, make_project
+
+    org = make_organization(db_session)
+    project = make_project(db_session, org)
+    raw_key, key_prefix, key_hash = generate_api_key()
+    api_key = make_api_key(
+        db_session, project, key_prefix=key_prefix, key_hash=key_hash, status="revoked"
+    )
+    return SimpleNamespace(raw_key=raw_key, organization=org, project=project, api_key=api_key)
