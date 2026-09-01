@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens for a dense, technical, developer-tool aesthetic.
+ * Dark mode follows system preference only (`prefers-color-scheme`) --
+ * no manual toggle, per the V1 design. Every color reference in the app
+ * should go through one of these tokens (via the Tailwind utilities
+ * `@theme inline` derives below: bg-background, text-foreground,
+ * border-border, text-status-error, etc.) rather than a raw Tailwind
+ * palette color, so light/dark stays consistent everywhere automatically.
+ */
+
+:root {
+  --background: #ffffff;
+  --surface: #f7f8fa;
+  --surface-hover: #eef0f3;
+  --border: #e2e5ea;
+  --foreground: #14171f;
+  --muted: #6b7280;
+
+  --accent: #4f46e5;
+  --accent-foreground: #ffffff;
+
+  --status-ok: #15803d;
+  --status-ok-bg: #dcfce7;
+  --status-error: #b91c1c;
+  --status-error-bg: #fee2e2;
+  --status-unknown: #6b7280;
+  --status-unknown-bg: #eef0f3;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0b0d;
+    --surface: #131519;
+    --surface-hover: #1c1f25;
+    --border: #262a31;
+    --foreground: #e6e8eb;
+    --muted: #8b92a0;
+
+    --accent: #818cf8;
+    --accent-foreground: #0a0b0d;
+
+    --status-ok: #4ade80;
+    --status-ok-bg: rgba(74, 222, 128, 0.14);
+    --status-error: #f87171;
+    --status-error-bg: rgba(248, 113, 113, 0.14);
+    --status-unknown: #9aa2b1;
+    --status-unknown-bg: rgba(154, 162, 177, 0.14);
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-hover: var(--surface-hover);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+
+  --color-status-ok: var(--status-ok);
+  --color-status-ok-bg: var(--status-ok-bg);
+  --color-status-error: var(--status-error);
+  --color-status-error-bg: var(--status-error-bg);
+  --color-status-unknown: var(--status-unknown);
+  --color-status-unknown-bg: var(--status-unknown-bg);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+/* Consistent focus ring everywhere, including the browser's own default
+   controls (native <select>, <summary>) -- accessibility must not depend
+   on every component remembering to add one. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
