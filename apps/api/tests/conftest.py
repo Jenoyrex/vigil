@@ -70,16 +70,98 @@ def fake_repository() -> FakeSpansRepository:
     return FakeSpansRepository()
 
 
+class FakeTracesQueryRepository:
+    """In-memory stand-in for app.clickhouse.query_repository.TracesQueryRepository.
+
+    Records the kwargs of every call (so route-level tests can assert
+    project_id/tenant scoping and parameter plumbing without a real
+    ClickHouse server) and returns scripted results.
+    """
+
+    def __init__(self) -> None:
+        self.list_traces_calls: list[dict[str, Any]] = []
+        self.list_traces_result: list[dict[str, Any]] = []
+        self.summarize_trace_calls: list[dict[str, Any]] = []
+        self.summarize_trace_result: dict[str, Any] | None = None
+        self.get_trace_spans_calls: list[dict[str, Any]] = []
+        self.get_trace_spans_result: list[dict[str, Any]] = []
+        self.get_span_calls: list[dict[str, Any]] = []
+        self.get_span_result: list[dict[str, Any]] = []
+        self.fail_with: Exception | None = None
+
+    def list_traces(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.list_traces_calls.append(kwargs)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return self.list_traces_result
+
+    def summarize_trace(self, **kwargs: Any) -> dict[str, Any] | None:
+        self.summarize_trace_calls.append(kwargs)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return self.summarize_trace_result
+
+    def get_trace_spans(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.get_trace_spans_calls.append(kwargs)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return self.get_trace_spans_result
+
+    def get_span(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.get_span_calls.append(kwargs)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return self.get_span_result
+
+
+@pytest.fixture
+def fake_traces_query_repository() -> FakeTracesQueryRepository:
+    return FakeTracesQueryRepository()
+
+
+class FakeAnalyticsRepository:
+    """In-memory stand-in for app.clickhouse.analytics_repository.AnalyticsRepository."""
+
+    def __init__(self) -> None:
+        self.span_analytics_calls: list[dict[str, Any]] = []
+        self.span_analytics_result: list[dict[str, Any]] = []
+        self.llm_usage_analytics_calls: list[dict[str, Any]] = []
+        self.llm_usage_analytics_result: list[dict[str, Any]] = []
+        self.fail_with: Exception | None = None
+
+    def span_analytics(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.span_analytics_calls.append(kwargs)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return self.span_analytics_result
+
+    def llm_usage_analytics(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.llm_usage_analytics_calls.append(kwargs)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return self.llm_usage_analytics_result
+
+
+@pytest.fixture
+def fake_analytics_repository() -> FakeAnalyticsRepository:
+    return FakeAnalyticsRepository()
+
+
 @pytest.fixture
 def client(
-    db_session: Session, fake_repository: FakeSpansRepository
+    db_session: Session,
+    fake_repository: FakeSpansRepository,
+    fake_traces_query_repository: FakeTracesQueryRepository,
+    fake_analytics_repository: FakeAnalyticsRepository,
 ) -> Generator[TestClient, None, None]:
-    """A TestClient wired to the test Postgres database and a fake ClickHouse
-    repository -- suitable for auth/validation/transformation tests that
-    should never touch a real ClickHouse server. See
-    test_traces_clickhouse_integration.py for the one test that does.
+    """A TestClient wired to the test Postgres database and fake ClickHouse
+    repositories (ingestion + read-side query/analytics) -- suitable for
+    auth/validation/transformation tests that should never touch a real
+    ClickHouse server. See test_traces_clickhouse_integration.py and
+    test_query_clickhouse_integration.py for the tests that do.
     """
-    from app.api.v1.traces import get_spans_repository
+    from app.api.v1.analytics import get_analytics_repository
+    from app.api.v1.traces import get_spans_repository, get_traces_query_repository
     from app.db.session import get_db
     from app.main import app
 
@@ -88,6 +170,8 @@ def client(
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_spans_repository] = lambda: fake_repository
+    app.dependency_overrides[get_traces_query_repository] = lambda: fake_traces_query_repository
+    app.dependency_overrides[get_analytics_repository] = lambda: fake_analytics_repository
     try:
         with TestClient(app) as test_client:
             yield test_client
@@ -106,6 +190,56 @@ def active_api_key(db_session: Session) -> SimpleNamespace:
     raw_key, key_prefix, key_hash = generate_api_key()
     api_key = make_api_key(db_session, project, key_prefix=key_prefix, key_hash=key_hash)
     return SimpleNamespace(raw_key=raw_key, organization=org, project=project, api_key=api_key)
+
+
+class FakeChResult:
+    """Enough of clickhouse_connect's QueryResult interface for
+    app.clickhouse.query_common.execute_query: `named_results()`."""
+
+    def __init__(self, column_names: tuple[str, ...], rows: list[tuple[Any, ...]]) -> None:
+        self.column_names = column_names
+        self.result_rows = rows
+
+    def named_results(self):
+        for row in self.result_rows:
+            yield dict(zip(self.column_names, row, strict=True))
+
+
+class FakeChQueryClient:
+    """Fake clickhouse_connect Client for repository-level tests: records
+    every `.query(query, parameters=...)` call (so tests can assert the
+    exact generated SQL and bound parameters -- tenant scoping, FINAL
+    presence/absence, etc.) and returns a scripted response.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[SimpleNamespace] = []
+        self._responses: list[FakeChResult] = []
+        self.fail_with: Exception | None = None
+
+    def queue_result(self, column_names: tuple[str, ...], rows: list[tuple[Any, ...]]) -> None:
+        self._responses.append(FakeChResult(column_names, rows))
+
+    def query(self, query: str, parameters: dict[str, Any] | None = None, **_: Any) -> FakeChResult:
+        self.calls.append(SimpleNamespace(query=query, parameters=parameters or {}))
+        if self.fail_with is not None:
+            raise self.fail_with
+        if self._responses:
+            return self._responses.pop(0)
+        return FakeChResult((), [])
+
+    @property
+    def last_query(self) -> str:
+        return self.calls[-1].query
+
+    @property
+    def last_parameters(self) -> dict[str, Any]:
+        return self.calls[-1].parameters
+
+
+@pytest.fixture
+def fake_ch_query_client() -> FakeChQueryClient:
+    return FakeChQueryClient()
 
 
 @pytest.fixture
