@@ -5,9 +5,10 @@
 any other part of the monorepo.
 
 It exposes a health check endpoint, the PostgreSQL schema (users, organizations, memberships,
-projects, API keys) via SQLAlchemy + Alembic, and the first application feature: telemetry
-ingestion (`POST /v1/traces`), which authenticates via API key and writes spans to ClickHouse. No
-background jobs, SDKs, dashboard, or evaluator have been added yet.
+projects, API keys) via SQLAlchemy + Alembic, telemetry ingestion (`POST /v1/traces`), and the
+read side of the Trace Explorer/analytics API (`GET /v1/traces*`, `GET /v1/analytics/*`) --
+authenticated via the same API key, writing to and reading from ClickHouse respectively. No
+background jobs, SDK-facing dashboard, or evaluator have been added yet.
 
 ## Requirements
 
@@ -206,6 +207,88 @@ is safe, but **this API does not provide exactly-once delivery**:
   `docs/decisions/003-clickhouse-telemetry-storage.md` decision 8) and would be its own follow-up
   ADR if added.
 
+## Trace Explorer & analytics (read API)
+
+Five read-only `GET` endpoints, all authenticated the same way as ingestion
+(`Authorization: Bearer <api-key>`) and scoped exclusively to the project resolved from that key
+-- there is no `project_id` parameter on any of them, so there is nothing a client could supply to
+override tenant scoping even by mistake.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/traces` | List traces (derived from spans), most recent first |
+| `GET /v1/traces/{trace_id}` | One trace and its spans |
+| `GET /v1/traces/{trace_id}/spans/{span_id}` | One span, in full |
+| `GET /v1/analytics/spans` | Span count, error rate, latency percentiles |
+| `GET /v1/analytics/llm-usage` | LLM token usage and cost |
+
+### Time windows
+
+`GET /v1/traces`, `GET /v1/analytics/spans`, and `GET /v1/analytics/llm-usage` all take optional
+`start_time_from`/`start_time_to` query parameters (RFC3339, and **must** include a UTC offset --
+a naive timestamp is rejected with `422`):
+
+- Omitting both defaults to the previous `VIGIL_API_DEFAULT_QUERY_WINDOW_HOURS` (24h).
+- The window may not exceed `VIGIL_API_MAX_QUERY_WINDOW_DAYS` (7 days) -- wider windows are
+  rejected with `422`, so a query can never accidentally scan the full 30-day retention window.
+- `start_time_from` after `start_time_to` is also a `422`.
+
+### Trace list pagination
+
+`GET /v1/traces` is ordered **`start_time DESC, trace_id DESC`** -- `trace_id` is a deterministic
+tie-breaker, not an incidental detail, since it's what keeps keyset pagination stable when
+multiple traces share the same `start_time`. Pagination is cursor-based (`next_cursor` in the
+response, `cursor` query parameter on the next request), never `OFFSET`: an opaque, base64-encoded
+token that encodes the previous page's last `(start_time, trace_id)`. This avoids both problems
+`OFFSET` has against continuously-ingested data -- unbounded per-page cost, and pages that skip or
+duplicate rows as new spans land while a user is paging through results.
+
+### Trace status
+
+A trace's `status` (`ok`/`error`/`unknown`) is derived from its spans, per
+`docs/decisions/002-trace-span-telemetry-model.md` decision 6: `error` if any span has
+`status = error`; else `ok` once the root span (`parent_span_id IS NULL`) has arrived; else
+`unknown`.
+
+### `FINAL` usage
+
+`GET /v1/traces/{trace_id}` and `GET /v1/traces/{trace_id}/spans/{span_id}` query ClickHouse with
+`FINAL` -- immediate deduplication, since these are the single-trace/single-span detail views
+`docs/decisions/003-clickhouse-telemetry-storage.md` section 8 identifies as needing it, and the
+query is already narrowed to one `project_id` + `trace_id` (+ `span_id`), so the cost is bounded.
+`GET /v1/traces` and both `/v1/analytics/*` endpoints deliberately do **not** use `FINAL` -- they
+are broad aggregates that tolerate `ReplacingMergeTree`'s eventual deduplication (the same section
+8 explicitly allows this), and forcing `FINAL` there would mean merge-level dedup logic running
+over a much larger scanned range on every request.
+
+### Traces with many spans
+
+`GET /v1/traces/{trace_id}` caps the returned `spans` array at
+`VIGIL_API_MAX_SPANS_PER_TRACE_RESPONSE` (default 2000). If a trace has more spans than that,
+`truncated: true` is set and `total_span_count` reports the real total (from a separate, cheap,
+untruncated aggregate query -- not the possibly-truncated page itself, since a trace's `status`
+must stay correct even for a truncated trace). There is no pagination of spans *within* one trace
+in V1.
+
+### Analytics `group_by`/`bucket`
+
+`GET /v1/analytics/spans` supports `group_by` (`environment` | `span_type` | `release` |
+`resource`) or `bucket` (`hour` | `day`) -- mutually exclusive (`422` if both are set). Grouped
+results are capped at the top 50 (by `span_count`, descending); bucketed results are chronological
+and implicitly bounded by the 7-day window cap. `GET /v1/analytics/llm-usage` only counts spans
+with a non-null `llm_provider` -- the documented "this is an LLM span" signal, independent of
+`span_type` -- and supports `group_by` of `llm_provider` | `llm_model` | `environment`, capped at
+the top 50 by `total_cost_usd`. `total_cost_usd` is a JSON **string**, not a number, to preserve
+`Decimal64(6)` precision.
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VIGIL_API_MAX_QUERY_WINDOW_DAYS` | `7` | Max `start_time_from`/`start_time_to` span for list/analytics endpoints |
+| `VIGIL_API_DEFAULT_QUERY_WINDOW_HOURS` | `24` | Window used when both bounds are omitted |
+| `VIGIL_API_MAX_SPANS_PER_TRACE_RESPONSE` | `2000` | Cap on spans returned by trace detail |
+
 ## Run tests
 
 Requires the `vigil_test` database (see Database setup above) with migrations applied. From
@@ -220,11 +303,24 @@ never touch the `vigil` development database. `tests/conftest.py` refuses to run
 doesn't point at a database whose name ends in `test`, and truncates all tables before and after
 each test for isolation.
 
-Most `/v1/traces` tests (`tests/test_traces_*.py`) use a fake ClickHouse repository (see
-`tests/conftest.py`'s `fake_repository`/`client` fixtures) and never need a real ClickHouse server.
-`tests/test_traces_clickhouse_integration.py` is the one exception — it runs against a real local
-ClickHouse and skips itself automatically (with a message explaining why) if one isn't reachable,
-so the rest of the suite isn't blocked by it.
+Most tests use a fake ClickHouse repository -- `tests/conftest.py`'s `fake_repository` (ingestion),
+`fake_traces_query_repository` (list/detail/span), and `fake_analytics_repository` (analytics)
+fixtures, all wired into the shared `client` TestClient fixture -- and never need a real ClickHouse
+server:
+
+- `tests/test_traces_*.py`, `tests/test_spans_detail.py`, `tests/test_analytics_*.py`: route-level
+  tests (auth, validation, tenant scoping, response shape) against the fake repositories.
+- `tests/test_query_repository.py`, `tests/test_analytics_repository.py`: repository-level tests
+  using `fake_ch_query_client` (a fake `clickhouse_connect` client) to assert the *exact* generated
+  SQL and bound parameters -- tenant scoping, `FINAL` presence/absence, no `OFFSET`, etc.
+- `tests/test_query_service.py`, `tests/test_analytics_service.py`: pure unit tests for time-window
+  validation, cursor encode/decode, status derivation, and NaN/Decimal handling.
+
+`tests/test_traces_clickhouse_integration.py` and `tests/test_query_clickhouse_integration.py` are
+the exceptions — they run against a real local ClickHouse (ingest via `POST /v1/traces`, then read
+back through every `GET` endpoint, including a tenant-isolation check across two projects) and skip
+themselves automatically (with a message explaining why) if one isn't reachable, so the rest of the
+suite isn't blocked by them.
 
 ## Run Ruff
 
