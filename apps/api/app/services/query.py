@@ -129,8 +129,8 @@ def _build_trace_summary(row: dict[str, Any]) -> TraceSummary:
         span_count=row["span_count"],
         error_span_count=row["error_span_count"],
         root_span_name=row["root_span_name"] or None,
-        environment=row["environment"],
-        resource=row["resource"],
+        environment=row["trace_environment"],
+        resource=row["trace_resource"],
     )
 
 

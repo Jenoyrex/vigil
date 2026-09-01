@@ -123,6 +123,17 @@ class TracesQueryRepository:
         where_sql = " AND ".join(conditions)
         having_sql = f"HAVING {' AND '.join(having_clauses)}" if having_clauses else ""
 
+        # `any(environment)`/`any(resource)` are deliberately aliased to
+        # `trace_environment`/`trace_resource`, NOT `environment`/`resource`:
+        # ClickHouse resolves a SELECT alias that shares a name with a real
+        # column against every reference to that name in the same query,
+        # including the WHERE clause -- so `any(environment) AS environment`
+        # together with a `WHERE environment = ...` filter substitutes the
+        # aggregate expression into WHERE and fails with "Aggregate function
+        # ... is found in WHERE" (verified directly against ClickHouse
+        # 24.8). Giving the aggregate a distinct alias avoids the collision
+        # entirely. See app/services/query.py's `_build_trace_summary`,
+        # which reads these same alias names back out of the row dict.
         query = f"""
             SELECT
                 toString(trace_id) AS trace_id,
@@ -132,8 +143,8 @@ class TracesQueryRepository:
                 countIf(status = 'error') AS error_span_count,
                 countIf(parent_span_id IS NULL) AS root_span_count,
                 anyIf(name, parent_span_id IS NULL) AS root_span_name,
-                any(environment) AS environment,
-                any(resource) AS resource
+                any(environment) AS trace_environment,
+                any(resource) AS trace_resource
             FROM spans
             WHERE {where_sql}
             GROUP BY trace_id

@@ -92,6 +92,37 @@ def test_list_traces_applies_environment_and_resource_filters(fake_ch_query_clie
     assert params["resource"] == "checkout-service"
 
 
+def test_list_traces_select_aliases_never_collide_with_filtered_column_names(
+    fake_ch_query_client,
+) -> None:
+    """`any(environment) AS environment` combined with a `WHERE environment
+    = ...` filter is rejected by real ClickHouse with "Aggregate function
+    ... is found in WHERE" (ILLEGAL_AGGREGATION) -- ClickHouse resolves a
+    SELECT alias against every reference to that name in the same query,
+    including WHERE, when the alias shares a name with a real column.
+    Verified directly against ClickHouse 24.8. The fake client here can't
+    catch the ClickHouse-side error itself (see
+    test_query_clickhouse_integration.py for the real-server regression
+    test), but this locks in the alias names the fix depends on.
+    """
+    repo = _repo(fake_ch_query_client)
+    repo.list_traces(
+        project_id=PROJECT_ID,
+        start_time_from=NOW,
+        start_time_to=NOW,
+        environment="production",
+        resource="checkout-service",
+        has_error=None,
+        limit=20,
+        cursor=None,
+    )
+    query = fake_ch_query_client.last_query
+    assert "AS trace_environment" in query
+    assert "AS trace_resource" in query
+    assert "AS environment" not in query
+    assert "AS resource" not in query
+
+
 def test_list_traces_has_error_true_filters_error_span_count(fake_ch_query_client) -> None:
     repo = _repo(fake_ch_query_client)
     repo.list_traces(

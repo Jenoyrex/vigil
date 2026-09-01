@@ -21,8 +21,8 @@ def _row(**overrides):
         "error_span_count": 0,
         "root_span_count": 1,
         "root_span_name": "checkout.process_order",
-        "environment": "production",
-        "resource": "checkout-service",
+        "trace_environment": "production",
+        "trace_resource": "checkout-service",
     }
     row.update(overrides)
     return row
