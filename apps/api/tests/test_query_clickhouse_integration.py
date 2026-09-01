@@ -153,6 +153,17 @@ def test_list_detail_span_and_analytics_against_real_clickhouse(
     assert trace_summary["span_count"] == 2
     assert trace_summary["root_span_name"] == "integration-root"
 
+    # -- GET /v1/traces?environment=... -- regression test for a real
+    # ClickHouse-only bug (ILLEGAL_AGGREGATION: "Aggregate function
+    # any(environment) AS environment is found in WHERE") that only
+    # manifests against a real server, never against the fake ClickHouse
+    # client every other list_traces test uses -- see
+    # app/clickhouse/query_repository.py's list_traces docstring.
+    filtered_response = real_client.get(
+        "/v1/traces", params={"environment": "integration-test"}, headers=headers
+    )
+    assert filtered_response.status_code == 200
+
     # -- GET /v1/traces/{trace_id} (detail) -------------------------------
     detail_response = real_client.get(f"/v1/traces/{trace_id}", headers=headers)
     assert detail_response.status_code == 200
