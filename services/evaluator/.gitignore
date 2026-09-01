@@ -1,0 +1,5 @@
+# Downloaded WikiQA cache (scripts/download_wikiqa.py). Never committed --
+# see scripts/download_wikiqa.py's module docstring and
+# validation/reports/wikiqa_baseline.md's licensing section for why: the
+# dataset's license does not permit Vigil to redistribute a copy.
+.cache/

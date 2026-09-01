@@ -1,0 +1,269 @@
+{
+  "run_info": {
+    "evaluator_name": "relevance",
+    "evaluator_version": "0.1.0",
+    "threshold_selection_method": "select_by_max_f1 (validation.metrics)",
+    "selected_threshold": 0.17,
+    "validation_split_size": 2733,
+    "test_split_size": 6165,
+    "failure_sample_seed": 42,
+    "evaluated_at": "2026-09-01T15:40:19.157464+00:00",
+    "dataset_metadata": {
+      "dataset_id": "microsoft/wiki_qa",
+      "dataset_config": "default",
+      "dataset_revision_sha": "3f104672b5de699878fe7907afc486f0de325eb5",
+      "source_api": "https://datasets-server.huggingface.co",
+      "license": "Microsoft Research Data License Agreement for Microsoft Research WikiQA Corpus -- research/technology-development use only; see validation/reports/wikiqa_baseline.md for the full analysis. NOT redistributed by Vigil -- this file records provenance for a copy downloaded directly by this script's caller, from the original source.",
+      "downloaded_at": "2026-09-01T15:39:10.127956+00:00",
+      "row_counts": {
+        "train": 20360,
+        "validation": 2733,
+        "test": 6165
+      }
+    }
+  },
+  "false_positives": [
+    {
+      "question_id": "Q1409",
+      "question": "what religion is church of christ",
+      "answer": "Church of Christ (Temple Lot) , a Latter Day Saint denomination based in Independence, Missouri",
+      "true_label": 0,
+      "score": 0.23773923857522397,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q1416",
+      "question": "when did spongebob first air",
+      "answer": "Hillenburg decided to use the name \"SpongeBob\".",
+      "true_label": 0,
+      "score": 0.17077611319011649,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q1485",
+      "question": "who made the matrix",
+      "answer": "Reviewers praised The Matrix for its innovative visual effects, cinematography and its entertainment.",
+      "true_label": 0,
+      "score": 0.25969799324016246,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q1552",
+      "question": "what are the root chords for first position?",
+      "answer": "Root position triads from C major scale .",
+      "true_label": 0,
+      "score": 0.35630042933313816,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q1780",
+      "question": "what is a law degree called?",
+      "answer": "The Juris Doctor (J.D.) is a professional doctorate and first professional graduate degree in law .",
+      "true_label": 0,
+      "score": 0.23773923857522397,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q182",
+      "question": "what does google don't be evil mean?",
+      "answer": "Criticism of Google often includes a reference to \"Don't be evil\".",
+      "true_label": 0,
+      "score": 0.38087260847594373,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q224",
+      "question": "How does Chronic Kidney Disease stage 4 effect Diabetics",
+      "answer": "Stage 5 CKD is often called End Stage Renal Disease (ESRD) and is synonymous with the now outdated terms chronic kidney failure (CKF) or chronic renal failure (CRF).",
+      "true_label": 0,
+      "score": 0.28848109315798065,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q236",
+      "question": "how did crater lake get its color",
+      "answer": "Crater Lake is known for the \" Old Man of the Lake \", a full-sized tree which is now a stump that has been bobbing vertically in the lake for more than a century.",
+      "true_label": 0,
+      "score": 0.3111192330518141,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q2500",
+      "question": "what is connecticut's intermediate appellate court",
+      "answer": "In some places, the appellate court has limited powers of review.",
+      "true_label": 0,
+      "score": 0.26055567105626243,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q2897",
+      "question": "what is an example of a chemical reaction that absorbs heat?",
+      "answer": "The substance (or substances) initially involved in a chemical reaction are called reactants or reagents .",
+      "true_label": 0,
+      "score": 0.17856621555757482,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q599",
+      "question": "how much population is a us urban city",
+      "answer": "World map showing percent of population living in an urban environment.",
+      "true_label": 0,
+      "score": 0.26951761324603224,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q656",
+      "question": "what division does uconn hockey play in?",
+      "answer": "UConn is one of only 15 universities in the nation that plays Division I FBS football and Division I men's ice hockey.",
+      "true_label": 0,
+      "score": 0.3249317266808788,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q715",
+      "question": "how was the president involved in the gulf war",
+      "answer": "The war is also known under other names , such as the Persian Gulf War, First Gulf War, Gulf War I, or the First Iraq War, before the term \"Iraq War\" became identified instead with the 2003 Iraq War (also referred to in the U.S. as \"Operation Iraqi Freedom\").",
+      "true_label": 0,
+      "score": 0.4151453425106566,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q769",
+      "question": "What album is our song on taylor swift",
+      "answer": "\"Our Song\", a 2010 song by The Spill Canvas",
+      "true_label": 0,
+      "score": 0.24121360667506986,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q933",
+      "question": "what blood type is universal donor",
+      "answer": "Blood type (or blood group) is determined, in part, by the ABO blood group antigens present on red blood cells.",
+      "true_label": 0,
+      "score": 0.3380951801252449,
+      "predicted_label": 1
+    }
+  ],
+  "false_negatives": [
+    {
+      "question_id": "Q102",
+      "question": "how does interlibrary loan work",
+      "answer": "Interlibrary loan (abbreviated ILL, and sometimes called interloan, document delivery, or document supply) is a service whereby a user of one library can borrow books or receive photocopies of documents that are owned by another library.",
+      "true_label": 1,
+      "score": 0.12160331478619008,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q102",
+      "question": "how does interlibrary loan work",
+      "answer": "The user makes a request with their local library, which, acting as an intermediary, identifies owners of the desired item, places the request, receives the item, makes it available to the user, and arranges for its return.",
+      "true_label": 1,
+      "score": 0.0,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q1067",
+      "question": "what percentage of water in in the body",
+      "answer": "In a newborn infant, this may be as high as 75 percent of the body weight, but it progressively decreases from birth to old age, most of the decrease occurring during the first 10 years of life.",
+      "true_label": 1,
+      "score": 0.07870893949125286,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q113",
+      "question": "how did harmon killebrew get strong",
+      "answer": "With quick hands and exceptional upper-body strength, Killebrew was known not just for the frequency of his home runs but also for their distance.",
+      "true_label": 1,
+      "score": 0.07644962318959062,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q1163",
+      "question": "what year did isaac newton die",
+      "answer": "Sir Isaac Newton (25 December 164220 March 1727) was an English physicist and mathematician who is widely regarded as one of the most influential scientists of all time and as a key figure in the scientific revolution .",
+      "true_label": 1,
+      "score": 0.1159213721352773,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q1236",
+      "question": "when to use semicolon",
+      "answer": "The Italian printer Aldus Manutius the Elder established the practice of using the semicolon to separate words of opposed meaning and to indicate interdependent statements.",
+      "true_label": 1,
+      "score": 0.10475117334177524,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q1860",
+      "question": "what is a neuro tract",
+      "answer": "A neural pathway, neural tract, or neural face, connects one part of the nervous system with another and usually consists of bundles of elongated, myelin -insulated neurons , known collectively as white matter .",
+      "true_label": 1,
+      "score": 0.08332471296185165,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q2433",
+      "question": "what is stent surgery",
+      "answer": "In the technical vocabulary of medicine , a stent is a mesh 'tube' inserted into a natural passage/conduit in the body to prevent or counteract a disease-induced, localized flow constriction.",
+      "true_label": 1,
+      "score": 0.09858610631498237,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q2880",
+      "question": "where was martin luther born",
+      "answer": "Martin Luther (; 10 November 1483 – 18 February 1546) was a German monk , former Catholic priest , professor of theology and seminal figure of a reform movement in sixteenth century Christianity , subsequently known as the Protestant Reformation .",
+      "true_label": 1,
+      "score": 0.14564803704307708,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q3008",
+      "question": "who is mary matalin married to",
+      "answer": "She is married to Democratic political consultant James Carville .",
+      "true_label": 1,
+      "score": 0.13627634143908643,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q345",
+      "question": "what became of rich on price is right",
+      "answer": "Fields can also be heard on the radio on K-EARTH 101 KRTH , KNX-AM and KFWB in Los Angeles.",
+      "true_label": 1,
+      "score": 0.0,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q414",
+      "question": "What does Human sperm consist of?",
+      "answer": "In humans, seminal fluid contains several components besides spermatozoa: proteolytic and other enzymes as well as fructose are elements of seminal fluid which promote the survival of spermatozoa and provide a medium through which they can move or \"swim\".",
+      "true_label": 1,
+      "score": 0.0,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q581",
+      "question": "how often does ham station need to ID?",
+      "answer": "Station identification used to be done regularly by an announcer at the halfway point during the presentation of a television program, or in between programs.",
+      "true_label": 1,
+      "score": 0.07357474610589511,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q615",
+      "question": "how many numbers on a credit card",
+      "answer": "An ISO/IEC 7812 card number is typically 16 digits in length, and consists of:",
+      "true_label": 1,
+      "score": 0.10371551133313006,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q692",
+      "question": "how did david carradine die",
+      "answer": "He died on June 3, 2009, apparently of auto-erotic asphyxiation .",
+      "true_label": 1,
+      "score": 0.0,
+      "predicted_label": 0
+    }
+  ]
+}
