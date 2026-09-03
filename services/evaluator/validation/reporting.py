@@ -129,6 +129,31 @@ def _failure_table(examples: list[FailureExample]) -> str:
     return "\n".join(lines) + "\n"
 
 
+#: Per-evaluator description line used by `render_markdown_report`'s header, keyed by
+#: `run_info["evaluator_name"]`. Added so this same rendering function can honestly describe
+#: either evaluator run through this harness (`validation/wikiqa.py` for the TF-IDF baseline,
+#: `validation/wikiqa_embedding.py` for the embedding candidate) without hardcoding one
+#: evaluator's identity into shared report-rendering code -- a caller with a `evaluator_name` not
+#: listed here still gets a generic, still-accurate fallback description rather than a wrong one.
+_EVALUATOR_DESCRIPTIONS = {
+    "relevance": (
+        "the existing deterministic **TF-IDF cosine-similarity lexical baseline** in "
+        "`services/evaluator/app/relevance.py`. This is explicitly **not** an embedding-based "
+        "evaluator (see `docs/decisions/004-evaluation-engine.md` section 1) — it is not "
+        "described as one anywhere in this report, and this validation does not change that "
+        "categorization."
+    ),
+    "relevance_embedding": (
+        "the experimental **dense semantic embedding cosine-similarity candidate** in "
+        "`services/evaluator/app/embedding_relevance.py` (`BAAI/bge-small-en-v1.5` via "
+        "`fastembed`/ONNX Runtime, local inference only). This is explicitly **not** the V1 "
+        "production evaluator — see `services/evaluator/README.md`'s \"Embedding relevance "
+        "evaluator (experimental)\" section and `validation/reports/wikiqa_comparison.md` for "
+        "the head-to-head comparison this report feeds into."
+    ),
+}
+
+
 def render_markdown_report(
     *,
     run_info: dict,
@@ -143,14 +168,15 @@ def render_markdown_report(
 ) -> str:
     cm = test_at_threshold.confusion_matrix
     dataset_meta = run_info.get("dataset_metadata", {})
+    evaluator_description = _EVALUATOR_DESCRIPTIONS.get(
+        run_info["evaluator_name"],
+        f"the evaluator named {run_info['evaluator_name']!r} in `services/evaluator/app/`.",
+    )
 
-    return f"""# WikiQA Baseline Validation Report
+    return f"""# WikiQA Validation Report — `{run_info["evaluator_name"]}`
 
-**Evaluator under test:** `{run_info["evaluator_name"]}` v`{run_info["evaluator_version"]}` — the
-existing deterministic **TF-IDF cosine-similarity lexical baseline** in
-`services/evaluator/app/relevance.py`. This is explicitly **not** an embedding-based evaluator (see
-`docs/decisions/004-evaluation-engine.md` section 1) — it is not described as one anywhere in this
-report, and this validation does not change that categorization.
+**Evaluator under test:** `{run_info["evaluator_name"]}` v`{run_info["evaluator_version"]}` —
+{evaluator_description}
 
 **Evaluated at:** {run_info["evaluated_at"]}
 
@@ -256,7 +282,7 @@ allowance, not Vigil redistributing a copy it holds.
 
 Bounded sample (seed={run_info["failure_sample_seed"]}, up to {len(false_positives)} false positives
 and {len(false_negatives)} false negatives shown; full machine-readable sample in
-`wikiqa_baseline_failures.json`).
+`{run_info.get("failures_json_filename", "wikiqa_baseline_failures.json")}`).
 
 ### False positives (evaluator said relevant; ground truth says not relevant)
 
