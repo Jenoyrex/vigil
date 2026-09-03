@@ -1,0 +1,269 @@
+{
+  "run_info": {
+    "evaluator_name": "relevance_embedding",
+    "evaluator_version": "0.1.0",
+    "threshold_selection_method": "select_by_max_f1 (validation.metrics)",
+    "selected_threshold": 0.89,
+    "validation_split_size": 2733,
+    "test_split_size": 6165,
+    "failure_sample_seed": 42,
+    "evaluated_at": "2026-09-03T04:02:47.104148+00:00",
+    "dataset_metadata": {
+      "dataset_id": "microsoft/wiki_qa",
+      "dataset_config": "default",
+      "dataset_revision_sha": "3f104672b5de699878fe7907afc486f0de325eb5",
+      "source_api": "https://datasets-server.huggingface.co",
+      "license": "Microsoft Research Data License Agreement for Microsoft Research WikiQA Corpus -- research/technology-development use only; see validation/reports/wikiqa_baseline.md for the full analysis. NOT redistributed by Vigil -- this file records provenance for a copy downloaded directly by this script's caller, from the original source.",
+      "downloaded_at": "2026-09-01T15:39:10.127956+00:00",
+      "row_counts": {
+        "train": 20360,
+        "validation": 2733,
+        "test": 6165
+      }
+    }
+  },
+  "false_positives": [
+    {
+      "question_id": "Q105",
+      "question": "what bacteria grow on macconkey agar",
+      "answer": "A MacConkey agar plate with an active bacterial culture.",
+      "true_label": 0,
+      "score": 0.9049867987632751,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q1067",
+      "question": "what percentage of water in in the body",
+      "answer": "In physiology , body water is the water content of the human body .",
+      "true_label": 0,
+      "score": 0.9291811585426331,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q1116",
+      "question": "what is accounts payable and receivable",
+      "answer": "Accounts receivable is money owed to a business by its clients (customers or debtors) and shown on its balance sheet as an asset.",
+      "true_label": 0,
+      "score": 0.9075229167938232,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q1892",
+      "question": "when do midlife crises happen",
+      "answer": "A midlife crisis is experienced by many people during the midlife transition when they realize that life may be more than halfway over.",
+      "true_label": 0,
+      "score": 0.9122312963008881,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q1963",
+      "question": "what is a tapered wheel bearing",
+      "answer": "Cutaway view of a tapered roller bearing",
+      "true_label": 0,
+      "score": 0.9061135053634644,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q2116",
+      "question": "what was michigan's first capital",
+      "answer": "The first state capitol was located in Detroit , the original capital of Michigan, and was relocated to Lansing in 1847, due to the need to develop the western portions of the state and for easy defense from British troops stationed in Windsor, Ontario .",
+      "true_label": 0,
+      "score": 0.92064169049263,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q2201",
+      "question": "what is the input and what is the output of a function",
+      "answer": "The output of a function f corresponding to an input x is denoted by f(x) (read \"f of x\").",
+      "true_label": 0,
+      "score": 0.8985330164432526,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q2359",
+      "question": "who are the field dimension for lacrosse",
+      "answer": "Field lacrosse is played professionally in North America by the Major League Lacrosse .",
+      "true_label": 0,
+      "score": 0.9029840230941772,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q2365",
+      "question": "what is psi in pressure",
+      "answer": "Pressure (the symbol: p) is the ratio of force to the area over which that force is distributed.",
+      "true_label": 0,
+      "score": 0.9083253741264343,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q2811",
+      "question": "when was the last national football championship for auburn",
+      "answer": "Auburn has claimed three national championships (1913, 1957, 2010) and produced three Heisman Trophy winners: quarterback Pat Sullivan in 1971 , running back Bo Jackson in 1985 , and quarterback Cam Newton in 2010 .",
+      "true_label": 0,
+      "score": 0.8992094993591309,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q355",
+      "question": "how does a heat pump work",
+      "answer": "A heat pump uses some amount of external high-grade energy to accomplish the desired transfer of thermal energy from heat source to heat sink.",
+      "true_label": 0,
+      "score": 0.9028646349906921,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q462",
+      "question": "what does gloria in excelsis deo mean",
+      "answer": "The name is often abbreviated to Gloria in Excelsis or simply Gloria.",
+      "true_label": 0,
+      "score": 0.9154730439186096,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q553",
+      "question": "what happened to the 6th army",
+      "answer": "Sixth Army may refer to:",
+      "true_label": 0,
+      "score": 0.9120809733867645,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q677",
+      "question": "how many members are in the house of representatives",
+      "answer": "The United States House of Representatives is one of the two houses of the United States Congress (a bicameral legislature ).",
+      "true_label": 0,
+      "score": 0.90899658203125,
+      "predicted_label": 1
+    },
+    {
+      "question_id": "Q910",
+      "question": "what food is in afghan",
+      "answer": "A table setting of Afghan food in Kabul .",
+      "true_label": 0,
+      "score": 0.9149211049079895,
+      "predicted_label": 1
+    }
+  ],
+  "false_negatives": [
+    {
+      "question_id": "Q1067",
+      "question": "what percentage of water in in the body",
+      "answer": "In a newborn infant, this may be as high as 75 percent of the body weight, but it progressively decreases from birth to old age, most of the decrease occurring during the first 10 years of life.",
+      "true_label": 1,
+      "score": 0.8375609517097473,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q113",
+      "question": "how did harmon killebrew get strong",
+      "answer": "With quick hands and exceptional upper-body strength, Killebrew was known not just for the frequency of his home runs but also for their distance.",
+      "true_label": 1,
+      "score": 0.8383454084396362,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q117",
+      "question": "How much did Waterboy grossed",
+      "answer": "The movie was extremely profitable, earning $161.5 million in North America alone.",
+      "true_label": 1,
+      "score": 0.7618428468704224,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q1212",
+      "question": "what school did Zach Thomas play for before making it in to the NFL",
+      "answer": "He played college football for Texas Tech University , and was recognized as an All-American .",
+      "true_label": 1,
+      "score": 0.8478606343269348,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q132",
+      "question": "how is whooping cough distinguished from similar diseases",
+      "answer": "Symptoms are initially mild, and then develop into severe coughing fits, which produce the namesake high-pitched \"whoop\" sound in infected babies and children when they inhale air after coughing.",
+      "true_label": 1,
+      "score": 0.8533067107200623,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q1760",
+      "question": "what is a google in math",
+      "answer": "A googol is the large number 10100; that is, the digit 1 followed by 100 zeroes :",
+      "true_label": 1,
+      "score": 0.8369482755661011,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q2308",
+      "question": "what was the first year of kentucky derby",
+      "answer": "Unlike the Preakness and Belmont Stakes, which took hiatuses in 1891-1893 and 1911-1912 respectively, the Kentucky Derby has been run every consecutive year since 1875.",
+      "true_label": 1,
+      "score": 0.8552660346031189,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q2682",
+      "question": "what is the actresses name that played in walk that line?",
+      "answer": "The film was nominated for five Academy Awards including Best Actor (Joaquin Phoenix), Best Actress (Reese Witherspoon, which she won), and Best Costume Design ( Arianne Phillips ).",
+      "true_label": 1,
+      "score": 0.7395789325237274,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q2933",
+      "question": "what is atherosclerotic heart disease",
+      "answer": "It is caused by the formation of multiple plaques within the arteries.",
+      "true_label": 1,
+      "score": 0.849073976278305,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q345",
+      "question": "what became of rich on price is right",
+      "answer": "Fields is currently a meteorologist for the CBS owned and operated television stations KCBS-TV and KCAL-TV in Los Angeles, California.",
+      "true_label": 1,
+      "score": 0.7351403534412384,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q345",
+      "question": "what became of rich on price is right",
+      "answer": "Fields can also be heard on the radio on K-EARTH 101 KRTH , KNX-AM and KFWB in Los Angeles.",
+      "true_label": 1,
+      "score": 0.7366909980773926,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q391",
+      "question": "what does a liquid oxygen plant look like",
+      "answer": "The blue color of liquid oxygen in a dewar flask",
+      "true_label": 1,
+      "score": 0.8814838230609894,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q452",
+      "question": "how jameson irish whiskey is made",
+      "answer": "Jameson is similar in its adherence to the single distillery principle to the single malt tradition, but Jameson blends column still spirit with Single pot still whiskey , a combination of malted barley with unmalted or \"green\" barley distilled in a pot still.",
+      "true_label": 1,
+      "score": 0.8501556515693665,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q638",
+      "question": "what does hair testing show",
+      "answer": "A drug test is a technical analysis of a biological specimen – for example urine, hair, blood, sweat, or oral fluid / saliva – to determine the presence or absence of specified parent drugs or their metabolites .",
+      "true_label": 1,
+      "score": 0.8588152229785919,
+      "predicted_label": 0
+    },
+    {
+      "question_id": "Q910",
+      "question": "what food is in afghan",
+      "answer": "Accompanying these staples are dairy products ( yogurt and whey ), various nuts , and native vegetables, as well as fresh and dried fruits; Afghanistan is well known for its grapes .",
+      "true_label": 1,
+      "score": 0.8659490644931793,
+      "predicted_label": 0
+    }
+  ]
+}

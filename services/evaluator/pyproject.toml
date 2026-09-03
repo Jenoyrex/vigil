@@ -8,6 +8,18 @@ dependencies = [
     "scikit-learn>=1.5.0",
 ]
 
+[project.optional-dependencies]
+# Only required by app/embedding_relevance.py -- the experimental embedding-based relevance
+# candidate. The V1 TF-IDF evaluator (app/relevance.py) never imports this and does not need it;
+# see README.md's "Embedding relevance evaluator (experimental)" section for why this stays an
+# extra rather than a base dependency: it is not yet the production evaluator, and its dependency
+# footprint (ONNX Runtime, tokenizers, huggingface-hub) is real and worth not forcing on every
+# install of this package.
+embedding = [
+    "fastembed>=0.8.0,<0.9.0",
+    "numpy>=1.26.0",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",
