@@ -22,7 +22,10 @@ if not TEST_DATABASE_URL.rsplit("/", 1)[-1].endswith("test"):
 _engine = create_engine(TEST_DATABASE_URL, pool_pre_ping=True)
 _TestSessionLocal = sessionmaker(bind=_engine, autoflush=False, expire_on_commit=False)
 
-_TABLES = "api_keys, organization_memberships, projects, organizations, users"
+_TABLES = (
+    "evaluation_jobs, evaluator_configs, evaluation_poller_checkpoint, "
+    "api_keys, organization_memberships, projects, organizations, users"
+)
 
 
 def _truncate_all() -> None:
