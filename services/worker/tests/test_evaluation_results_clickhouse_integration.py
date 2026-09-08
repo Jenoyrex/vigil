@@ -24,7 +24,7 @@ import uuid
 
 import pytest
 
-from app.clickhouse.repository import EvaluationResultsRepository
+from worker.clickhouse.repository import EvaluationResultsRepository
 
 TEST_EVALUATION_ID = uuid.UUID("00000000-0000-4000-8000-0000000000e2")
 TEST_PROJECT_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
@@ -34,8 +34,8 @@ TEST_SPAN_ID = "00f067aa0ba902b7"
 
 @pytest.fixture
 def real_clickhouse_client():
-    from app.clickhouse.client import get_clickhouse_client
-    from app.config import settings
+    from worker.clickhouse.client import get_clickhouse_client
+    from worker.config import settings
 
     try:
         ch_client = get_clickhouse_client()

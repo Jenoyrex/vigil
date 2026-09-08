@@ -1,4 +1,4 @@
-"""Repository-level tests for app.postgres.repository.EvaluationJobsRepository.
+"""Repository-level tests for worker.postgres.repository.EvaluationJobsRepository.
 
 Uses `fake_postgres_connection` (see tests/conftest.py) instead of a real
 PostgreSQL server -- these tests assert the exact SQL text and bound
@@ -18,7 +18,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from app.postgres.repository import EvaluationJobsRepository
+from worker.postgres.repository import EvaluationJobsRepository
 
 JOB_ID = uuid.uuid4()
 PROJECT_ID = uuid.uuid4()

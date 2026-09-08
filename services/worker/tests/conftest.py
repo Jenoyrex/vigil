@@ -79,8 +79,8 @@ def fake_clickhouse_client() -> FakeClickHouseClient:
 
 
 class FakePostgresCursor:
-    """Enough of a psycopg Cursor for EvaluationJobsRepository:
-    `fetchall()` and `rowcount`."""
+    """Enough of a psycopg Cursor for EvaluationJobsRepository/
+    EvaluatorConfigRepository: `fetchall()`, `fetchone()`, and `rowcount`."""
 
     def __init__(self, rows: list[tuple[Any, ...]], rowcount: int) -> None:
         self._rows = rows
@@ -89,9 +89,13 @@ class FakePostgresCursor:
     def fetchall(self) -> list[tuple[Any, ...]]:
         return self._rows
 
+    def fetchone(self) -> tuple[Any, ...] | None:
+        return self._rows[0] if self._rows else None
+
 
 class FakePostgresConnection:
-    """Fake psycopg Connection for EvaluationJobsRepository unit tests:
+    """Fake psycopg Connection for EvaluationJobsRepository/
+    EvaluatorConfigRepository unit tests:
     records every `.execute(query, params)` call (so tests can assert the
     exact generated SQL and bound parameters -- the attempt_count fencing
     clause, in particular -- without a real server) and returns a scripted
