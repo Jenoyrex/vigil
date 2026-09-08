@@ -29,9 +29,12 @@ Data persists in the `vigil_clickhouse_data` Docker volume across restarts.
 
 The official ClickHouse image runs every `.sql`/`.sh` file mounted at
 `/docker-entrypoint-initdb.d/` exactly once, the first time it starts against an **empty** data
-volume. `infrastructure/clickhouse/init/001_create_spans_table.sql` is mounted there and creates
-the `spans` table, so a fresh `docker compose up -d clickhouse` is deterministic: no manual
-`clickhouse-client` commands are needed to get a working schema.
+volume, in lexicographic filename order. `infrastructure/clickhouse/init/001_create_spans_table.sql`
+creates the `spans` table and `infrastructure/clickhouse/init/002_create_evaluation_results_table.sql`
+creates the `evaluation_results` table (per
+[`docs/decisions/005-evaluation-job-storage-worker.md`](../../docs/decisions/005-evaluation-job-storage-worker.md)),
+so a fresh `docker compose up -d clickhouse` is deterministic: no manual `clickhouse-client`
+commands are needed to get a working schema.
 
 The image's entrypoint only uses `CLICKHOUSE_DB` to run an initial `CREATE DATABASE`; it does
 **not** pass `--database` when executing mounted `.sql` files, so an unqualified `CREATE TABLE
@@ -79,6 +82,18 @@ then inserts a duplicate of that same span (same `project_id`/`trace_id`/`span_i
 The script uses a fixed, obviously-fake `project_id`/`trace_id`/`span_id` so it's safe to rerun
 and won't collide with real data; it leaves its test rows in place afterward (this is a local dev
 sandbox, not a database you need to keep clean — reset the volume if you want a blank slate).
+
+## Verify the `evaluation_results` table
+
+```bash
+infrastructure/clickhouse/verify_evaluation_results.sh
+```
+
+Same structure as `verify.sh` above, applied to `evaluation_results`: reachability, table
+existence, `SHOW CREATE TABLE` against ADR 005 section 5, insert/query-back, then a duplicate
+insert (same `evaluation_id`, later `written_at`) to demonstrate the identical
+eventual/`FINAL`/`OPTIMIZE`-collapse dedup behavior. Uses its own fixed, obviously-fake
+`evaluation_id` so it is safe to rerun independently of `verify.sh`.
 
 ### Why a shell script instead of an automated test suite
 
