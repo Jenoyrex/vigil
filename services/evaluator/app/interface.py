@@ -34,10 +34,30 @@ class Evaluator(Protocol[TInput]):
     shared base class -- so a new evaluator (or a test double) can be
     written with zero coupling to this module beyond the shape itself.
     `runtime_checkable` lets callers do `isinstance(x, Evaluator)` as a
-    cheap sanity check without that coupling either.
+    cheap sanity check without that coupling either. Note that
+    `runtime_checkable` only verifies member *presence* (`name`,
+    `version`, `evaluate`), never a method's exact signature -- an
+    `evaluate` that ignores `threshold` entirely still satisfies this
+    Protocol; see test_interface.py's compatibility test.
+
+    `threshold`, keyword-only and optional, is the sole per-call
+    override an evaluator accepts. `None` (every caller before this
+    parameter existed, and any caller that still omits it) means "use
+    this instance's own configured/constructed default" -- unchanged
+    behavior. A caller that does pass a value (services/worker,
+    resolving one project's configured `evaluator_configs.threshold`)
+    overrides the threshold for that one call only; the instance's own
+    default, and any other in-flight or future call against the same
+    long-lived instance, are unaffected. This is what lets one
+    expensive-to-construct evaluator instance (see e.g.
+    embedding_relevance.py's ONNX session) be shared across many
+    projects with different configured thresholds without constructing
+    a separate instance per threshold.
     """
 
     name: str
     version: str
 
-    def evaluate(self, evaluator_input: TInput) -> EvaluationResult: ...
+    def evaluate(
+        self, evaluator_input: TInput, *, threshold: float | None = None
+    ) -> EvaluationResult: ...

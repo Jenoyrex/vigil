@@ -267,6 +267,66 @@ def test_threshold_boundary_is_inclusive_of_relevant() -> None:
     assert result.label == "relevant"
 
 
+# -- per-call threshold override -------------------------------------------
+#
+# Deliberately exercised against the shared module-scoped `evaluator`
+# fixture (constructed once, at its default threshold), not a fresh
+# per-test instance -- this is exactly the intended production usage this
+# feature exists for: one loaded ONNX session, many per-call thresholds.
+
+
+def test_per_call_threshold_overrides_instance_default(
+    evaluator: EmbeddingRelevanceEvaluator,
+) -> None:
+    result = evaluator.evaluate(
+        RelevanceEvaluatorInput(_UNRELATED_INPUT, _UNRELATED_OUTPUT), threshold=0.0
+    )
+    assert result.label == "relevant"
+
+
+def test_per_call_threshold_none_falls_back_to_instance_default(
+    evaluator: EmbeddingRelevanceEvaluator,
+) -> None:
+    explicit_none = evaluator.evaluate(
+        RelevanceEvaluatorInput(_RELEVANT_INPUT, _RELEVANT_OUTPUT), threshold=None
+    )
+    omitted = evaluator.evaluate(RelevanceEvaluatorInput(_RELEVANT_INPUT, _RELEVANT_OUTPUT))
+    assert explicit_none.label == omitted.label
+
+
+def test_per_call_threshold_does_not_mutate_instance_state(
+    evaluator: EmbeddingRelevanceEvaluator,
+) -> None:
+    """A call with an override must never change what a later call on the
+    same shared instance (with no override) does. Compares the
+    no-override call's label against a no-override baseline captured
+    before the override, rather than asserting a specific label outright
+    -- unlike TF-IDF's exactly-zero orthogonal-vocabulary case, this
+    embedding pair's absolute rescaled cosine similarity relative to
+    `DEFAULT_THRESHOLD` is not something this test suite has independently
+    established, so asserting self-consistency is the correct check here,
+    not a guess at the concrete label."""
+    evaluator_input = RelevanceEvaluatorInput(_UNRELATED_INPUT, _UNRELATED_OUTPUT)
+    baseline_label = evaluator.evaluate(evaluator_input).label
+
+    overridden = evaluator.evaluate(evaluator_input, threshold=0.0)
+    assert overridden.label == "relevant"
+
+    after = evaluator.evaluate(evaluator_input)
+    assert after.label == baseline_label
+    assert evaluator._threshold == DEFAULT_THRESHOLD
+
+
+def test_evaluate_rejects_out_of_range_per_call_threshold(
+    evaluator: EmbeddingRelevanceEvaluator,
+) -> None:
+    evaluator_input = RelevanceEvaluatorInput(_RELEVANT_INPUT, _RELEVANT_OUTPUT)
+    with pytest.raises(ValueError):
+        evaluator.evaluate(evaluator_input, threshold=1.5)
+    with pytest.raises(ValueError):
+        evaluator.evaluate(evaluator_input, threshold=-0.1)
+
+
 # -- malformed input -------------------------------------------------------
 
 

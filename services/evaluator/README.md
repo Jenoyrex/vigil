@@ -145,12 +145,19 @@ rescaling.
   identical text.
 - **Label:** `"relevant"` if `score >= threshold`, else `"not_relevant"`; `"not_evaluable"` when no
   score could be computed at all.
-- **Threshold is a required constructor argument with an explicitly unvalidated default
+- **Threshold is a constructor argument with an explicitly unvalidated default
   (`DEFAULT_THRESHOLD = 0.5`).** This number has not been checked against any labeled data. It is
   configurable specifically *because* no offline validation has happened yet (ADR 004 section 10) —
   the validation harness milestone is expected to determine a real threshold, or determine that a
   single global threshold isn't the right mechanism at all. **This evaluator's output must not be
   treated as accurate or calibrated until that validation exists.**
+- **`evaluate()` also accepts an optional, keyword-only per-call `threshold`** (see `interface.py`'s
+  `Evaluator.evaluate` docstring), which overrides the constructor's threshold for that one call
+  only and never mutates the instance. This is how `services/worker` (not yet built) is expected to
+  apply one project's configured `evaluator_configs.threshold` against a single, expensively-shared
+  evaluator instance — see docs/decisions/005-evaluation-job-storage-worker.md's threshold-resolution
+  amendment. `threshold=None` (every call before this parameter existed, and any call that still
+  omits it) means "use this instance's own constructor-time default" — unchanged behavior.
 - **Empty/missing input or output:** if either text is empty or whitespace-only after stripping, the
   result is `score=None, label="not_evaluable"`, with an explanation naming which side was empty.
   This is a defined, non-error outcome, not a crash and not a misleading `0.0` score (a `0.0` score
@@ -308,10 +315,16 @@ shape. `app/relevance.py` is only ever imported from here, never modified.
   ambiguity in the `(project_id, trace_id, span_id, evaluator_name, evaluator_version)` idempotency
   key `docs/decisions/004-evaluation-engine.md` section 5 defines for evaluation jobs, should both
   ever run against the same span in a future production integration.
-- **Threshold is a required constructor argument with an explicitly unvalidated default
+- **Threshold is a constructor argument with an explicitly unvalidated default
   (`DEFAULT_THRESHOLD = 0.5`)** — same posture as TF-IDF's threshold: not checked against labeled
   data until the WikiQA validation harness runs; see `validation/reports/wikiqa_embedding.md` for
   the threshold that harness actually selects.
+- **`evaluate()` also accepts an optional, keyword-only per-call `threshold`**, identical semantics
+  to the TF-IDF evaluator's (see that evaluator's own README section above and `interface.py`'s
+  `Evaluator.evaluate` docstring): overrides the constructor's threshold for one call only, never
+  mutates the instance, and `threshold=None` defers to the constructor-time default. This is what
+  lets one loaded ONNX session (expensive to construct — see "Two distinct phases" above) serve many
+  projects' independently configured thresholds without loading a separate session per threshold.
 - **Empty/whitespace input or output:** identical `not_evaluable` handling to TF-IDF, same
   explanation convention.
 - **Punctuation-only / stop-word-only text is evaluable here, unlike TF-IDF.** A subword-tokenized

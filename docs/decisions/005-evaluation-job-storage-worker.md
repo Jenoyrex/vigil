@@ -523,3 +523,41 @@ production traffic — WikiQA's selected thresholds included — is promoted int
 - The concrete PostgreSQL model code, Alembic migration, ClickHouse DDL, and `services/worker`
   implementation are separate, later work, gated on this ADR — per the same order this ADR's own
   section 15 specifies.
+
+## Amendment (Phase 3 planning): per-project threshold resolution
+
+Section 12 already requires `evaluator_configs.threshold` to be configurable "at any time, without a
+migration or deployment," but this ADR did not originally specify *how* a resolved, per-project
+threshold reaches an evaluator at evaluation time — section 6 separately requires each evaluator to
+be constructed once per worker process (never once per job, since `EmbeddingRelevanceEvaluator`'s
+ONNX session load is expensive) and reused across every job it processes, regardless of which
+project that job belongs to. Phase 3 implementation planning surfaced the resulting gap directly: a
+single long-lived evaluator instance cannot, on its own, apply two different projects' two different
+configured thresholds if `threshold` is fixed at construction time — the two requirements as
+originally written were in tension, not merely under-specified.
+
+**Resolution**: `services/evaluator`'s `Evaluator.evaluate()` contract (`app/interface.py`) gained an
+optional, keyword-only `threshold: float | None = None` parameter, alongside its existing
+constructor-time `threshold`. `services/worker` resolves the effective threshold for a claimed job —
+reading that project's `evaluator_configs.threshold` (`NULL` resolves to `None`) — and passes it into
+that one call: `evaluator.evaluate(evaluator_input, threshold=resolved_threshold)`. `threshold=None`
+(every call site before this parameter existed, and any call that still omits it) preserves the
+evaluator's own constructor-configured default exactly, unchanged. A per-call override affects only
+that one invocation and never mutates the instance (`self._threshold` is never written to), so
+concurrent or subsequent calls against the same shared instance — from the same project or a
+different one — are unaffected by any other call's override.
+
+This keeps every allocation this ADR already committed to unchanged: **evaluator instances remain
+keyed by `(evaluator_name, evaluator_version)` and constructed exactly once at worker startup
+(section 6)**; **the model/ONNX session is loaded exactly once per instance**; and **the evaluator,
+not `services/worker`, continues to own threshold-to-label semantics** (`services/worker` never
+duplicates the `score >= threshold` comparison or any evaluator's labeling logic — it only resolves
+and forwards a number). Resolving `evaluator_configs.threshold` is worker-owned execution mechanics
+(a parameter needed to run a job already known to exist), not the job-creation eligibility gate
+section 10 reserves for `apps/api` (`enabled`/`sampling_rate`/ground-truth `project_id` verification
+remain exactly as section 9/10 already specify, untouched by this amendment) — it does not reopen or
+narrow that boundary.
+
+No WikiQA-derived number is introduced or promoted as a result of this amendment — `DEFAULT_THRESHOLD
+= 0.5` in both evaluators remains the same unvalidated placeholder section 12 already named, now
+reachable as the per-call fallback (`threshold=None`) as well as the constructor-time default.

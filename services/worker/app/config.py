@@ -1,9 +1,11 @@
 """services/worker settings, same `pydantic-settings`/env-var pattern as
 `apps/api/app/config.py` (see docs/decisions/005-evaluation-job-storage-worker.md
-section 12), scoped for now to what Phase 2 (ClickHouse `evaluation_results`
-storage only) actually needs. Job-claiming/dispatch settings
-(`max_concurrent_evaluations`, `evaluator_call_timeout_seconds`, etc.) belong
-to the later phase that introduces the claim loop and dispatch, not here.
+section 12), scoped for now to what has actually been built: ClickHouse
+`evaluation_results` storage and PostgreSQL `evaluation_jobs` lifecycle/
+claiming. Dispatch/retry/reaper/poller settings
+(`max_concurrent_evaluations`, `evaluator_call_timeout_seconds`,
+`retry_base_seconds`, etc.) belong to the later phases that introduce that
+behavior, not here.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,6 +23,13 @@ class Settings(BaseSettings):
     clickhouse_user: str = "vigil"
     clickhouse_password: str = "vigil"
     clickhouse_timeout_seconds: float = 10.0
+
+    # PostgreSQL connection -- raw psycopg, never SQLAlchemy/apps/api's ORM
+    # (ADR 001 decision 6, ADR 005 section 6). A plain `postgresql://` DSN
+    # (psycopg's own conninfo format), not apps/api's SQLAlchemy-dialect-
+    # prefixed `postgresql+psycopg://` one, though it points at the same
+    # local database by default.
+    database_url: str = "postgresql://vigil:vigil@localhost:5434/vigil"
 
 
 settings = Settings()

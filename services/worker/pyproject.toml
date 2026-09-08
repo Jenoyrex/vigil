@@ -1,12 +1,13 @@
 [project]
 name = "vigil-worker"
 version = "0.1.0"
-description = "Vigil evaluation worker - job storage layer (Phase 2: ClickHouse evaluation_results only)"
+description = "Vigil evaluation worker - job storage layer (ClickHouse evaluation_results, PostgreSQL evaluation_jobs lifecycle)"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "pydantic-settings>=2.6.0",
     "clickhouse-connect>=1.7.2",
+    "psycopg[binary]>=3.2.0",
 ]
 
 [dependency-groups]
