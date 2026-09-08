@@ -14,7 +14,7 @@ state transition it is explicitly told to make, with an explicit
 
 Every method here is exactly one SQL statement, executed against a
 connection the caller owns and passes in (mirroring
-`app.clickhouse.repository.EvaluationResultsRepository`'s
+`worker.clickhouse.repository.EvaluationResultsRepository`'s
 `__init__(self, client)` shape) -- this module never opens its own
 connection, so a test can pass a connection with whatever transaction
 semantics a given scenario needs (see tests/test_evaluation_jobs_postgres_integration.py's

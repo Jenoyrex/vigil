@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import psycopg
 
-from app.config import settings
+from worker.config import settings
 
 
 def get_connection() -> psycopg.Connection:

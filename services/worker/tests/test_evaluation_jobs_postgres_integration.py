@@ -1,5 +1,5 @@
 """Real-PostgreSQL integration tests for
-app.postgres.repository.EvaluationJobsRepository.
+worker.postgres.repository.EvaluationJobsRepository.
 
 These are the tests that actually matter for this milestone's acceptance
 criterion: SKIP LOCKED concurrency correctness and the attempt_count
@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 import psycopg
 import pytest
 
-from app.postgres.repository import EvaluationJobsRepository
+from worker.postgres.repository import EvaluationJobsRepository
 
 PG_TEST_DATABASE_URL = os.environ.get(
     "VIGIL_WORKER_TEST_DATABASE_URL",

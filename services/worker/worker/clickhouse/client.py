@@ -18,7 +18,7 @@ import threading
 import clickhouse_connect
 from clickhouse_connect.driver.client import Client
 
-from app.config import settings
+from worker.config import settings
 
 _thread_local = threading.local()
 

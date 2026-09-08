@@ -1,4 +1,4 @@
-"""Repository-level tests for app.clickhouse.repository.EvaluationResultsRepository.
+"""Repository-level tests for worker.clickhouse.repository.EvaluationResultsRepository.
 
 Uses `fake_clickhouse_client` (see tests/conftest.py) instead of a real
 ClickHouse server -- these tests assert the exact column order passed to
@@ -14,7 +14,7 @@ import uuid
 import pytest
 from clickhouse_connect.driver.exceptions import ClickHouseError, OperationalError
 
-from app.clickhouse.repository import (
+from worker.clickhouse.repository import (
     RESULT_COLUMNS,
     ClickHouseInsertError,
     ClickHouseQueryError,
