@@ -127,7 +127,16 @@ class EmbeddingRelevanceEvaluator:
             model_name=model_name, cache_dir=resolved_cache_dir, threads=threads
         )
 
-    def evaluate(self, evaluator_input: RelevanceEvaluatorInput) -> EvaluationResult:
+    def evaluate(
+        self, evaluator_input: RelevanceEvaluatorInput, *, threshold: float | None = None
+    ) -> EvaluationResult:
+        """`threshold`, if given, overrides this instance's own configured
+        threshold for this call only -- `self._threshold` is never
+        mutated, so a later call (or a concurrent one, from another
+        project, against this same shared instance/ONNX session) is
+        unaffected. See `interface.Evaluator.evaluate`'s docstring for
+        the full rationale.
+        """
         start = time.perf_counter()
 
         if not isinstance(evaluator_input, RelevanceEvaluatorInput):
@@ -135,6 +144,10 @@ class EmbeddingRelevanceEvaluator:
                 f"EmbeddingRelevanceEvaluator.evaluate requires a RelevanceEvaluatorInput, "
                 f"got {type(evaluator_input).__name__}."
             )
+
+        effective_threshold = threshold if threshold is not None else self._threshold
+        if not 0.0 <= effective_threshold <= 1.0:
+            raise ValueError(f"threshold must be within [0.0, 1.0], got {effective_threshold!r}.")
 
         input_stripped = evaluator_input.input_text.strip()
         output_stripped = evaluator_input.output_text.strip()
@@ -156,10 +169,10 @@ class EmbeddingRelevanceEvaluator:
         )
         score = _rescaled_cosine_similarity(input_vector, output_vector)
 
-        label = _LABEL_RELEVANT if score >= self._threshold else _LABEL_NOT_RELEVANT
+        label = _LABEL_RELEVANT if score >= effective_threshold else _LABEL_NOT_RELEVANT
         explanation = (
             f"Embedding cosine similarity (rescaled to [0.0, 1.0]) between input and output was "
-            f"{score:.4f}; threshold={self._threshold:.4f} -> label={label!r}."
+            f"{score:.4f}; threshold={effective_threshold:.4f} -> label={label!r}."
         )
 
         return EvaluationResult(

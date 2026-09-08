@@ -104,7 +104,15 @@ class RelevanceEvaluator:
             raise ValueError(f"threshold must be within [0.0, 1.0], got {threshold!r}.")
         self._threshold = threshold
 
-    def evaluate(self, evaluator_input: RelevanceEvaluatorInput) -> EvaluationResult:
+    def evaluate(
+        self, evaluator_input: RelevanceEvaluatorInput, *, threshold: float | None = None
+    ) -> EvaluationResult:
+        """`threshold`, if given, overrides this instance's own configured
+        threshold for this call only -- `self._threshold` is never
+        mutated, so a later call (or a concurrent one, from another
+        project, against this same shared instance) is unaffected. See
+        `interface.Evaluator.evaluate`'s docstring for the full rationale.
+        """
         start = time.perf_counter()
 
         if not isinstance(evaluator_input, RelevanceEvaluatorInput):
@@ -112,6 +120,10 @@ class RelevanceEvaluator:
                 f"RelevanceEvaluator.evaluate requires a RelevanceEvaluatorInput, "
                 f"got {type(evaluator_input).__name__}."
             )
+
+        effective_threshold = threshold if threshold is not None else self._threshold
+        if not 0.0 <= effective_threshold <= 1.0:
+            raise ValueError(f"threshold must be within [0.0, 1.0], got {effective_threshold!r}.")
 
         input_stripped = evaluator_input.input_text.strip()
         output_stripped = evaluator_input.output_text.strip()
@@ -138,10 +150,10 @@ class RelevanceEvaluator:
                 "numbers, or common stop words).",
             )
 
-        label = _LABEL_RELEVANT if score >= self._threshold else _LABEL_NOT_RELEVANT
+        label = _LABEL_RELEVANT if score >= effective_threshold else _LABEL_NOT_RELEVANT
         explanation = (
             f"TF-IDF cosine similarity between input and output was {score:.4f} "
-            f"(range [0.0, 1.0]); threshold={self._threshold:.4f} -> label={label!r}."
+            f"(range [0.0, 1.0]); threshold={effective_threshold:.4f} -> label={label!r}."
         )
 
         return EvaluationResult(

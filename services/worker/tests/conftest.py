@@ -76,3 +76,54 @@ class FakeClickHouseClient:
 @pytest.fixture
 def fake_clickhouse_client() -> FakeClickHouseClient:
     return FakeClickHouseClient()
+
+
+class FakePostgresCursor:
+    """Enough of a psycopg Cursor for EvaluationJobsRepository:
+    `fetchall()` and `rowcount`."""
+
+    def __init__(self, rows: list[tuple[Any, ...]], rowcount: int) -> None:
+        self._rows = rows
+        self.rowcount = rowcount
+
+    def fetchall(self) -> list[tuple[Any, ...]]:
+        return self._rows
+
+
+class FakePostgresConnection:
+    """Fake psycopg Connection for EvaluationJobsRepository unit tests:
+    records every `.execute(query, params)` call (so tests can assert the
+    exact generated SQL and bound parameters -- the attempt_count fencing
+    clause, in particular -- without a real server) and returns a scripted
+    `(rows, rowcount)` response. Mirrors `FakeChQueryClient`'s
+    call-recording pattern, adapted to psycopg's `Connection.execute`
+    shape rather than clickhouse_connect's `Client.query`.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[SimpleNamespace] = []
+        self._responses: list[tuple[list[tuple[Any, ...]], int]] = []
+        self.fail_with: Exception | None = None
+
+    def queue_result(self, rows: list[tuple[Any, ...]] = (), rowcount: int = 0) -> None:
+        self._responses.append((list(rows), rowcount))
+
+    def execute(self, query: str, params: dict[str, Any] | None = None) -> FakePostgresCursor:
+        self.calls.append(SimpleNamespace(query=query, params=params or {}))
+        if self.fail_with is not None:
+            raise self.fail_with
+        rows, rowcount = self._responses.pop(0) if self._responses else ([], 0)
+        return FakePostgresCursor(rows, rowcount)
+
+    @property
+    def last_query(self) -> str:
+        return self.calls[-1].query
+
+    @property
+    def last_params(self) -> dict[str, Any]:
+        return self.calls[-1].params
+
+
+@pytest.fixture
+def fake_postgres_connection() -> FakePostgresConnection:
+    return FakePostgresConnection()

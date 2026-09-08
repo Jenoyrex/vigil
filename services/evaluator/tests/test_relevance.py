@@ -184,6 +184,54 @@ def test_threshold_boundary_is_inclusive_of_relevant() -> None:
     assert result.label == "relevant"
 
 
+# -- per-call threshold override -------------------------------------------
+
+
+def test_per_call_threshold_overrides_instance_default() -> None:
+    """An instance constructed with one threshold can still be called with
+    a different, per-call threshold that flips the label -- this is what
+    lets one long-lived instance serve many projects' configured
+    thresholds."""
+    evaluator = RelevanceEvaluator(threshold=0.999999)
+    result = evaluator.evaluate(
+        RelevanceEvaluatorInput(_RELEVANT_INPUT, _RELEVANT_OUTPUT), threshold=0.0
+    )
+    assert result.label == "relevant"
+
+
+def test_per_call_threshold_none_falls_back_to_instance_default() -> None:
+    evaluator = RelevanceEvaluator(threshold=0.999999)
+    explicit_none = evaluator.evaluate(
+        RelevanceEvaluatorInput(_RELEVANT_INPUT, _RELEVANT_OUTPUT), threshold=None
+    )
+    omitted = evaluator.evaluate(RelevanceEvaluatorInput(_RELEVANT_INPUT, _RELEVANT_OUTPUT))
+    assert explicit_none.label == omitted.label == "not_relevant"
+
+
+def test_per_call_threshold_does_not_mutate_instance_state() -> None:
+    """A call with an override must never change what a later call on the
+    same instance (with no override) does -- there is no shared mutable
+    threshold state between calls."""
+    evaluator = RelevanceEvaluator(threshold=0.999999)
+    evaluator_input = RelevanceEvaluatorInput(_RELEVANT_INPUT, _RELEVANT_OUTPUT)
+
+    overridden = evaluator.evaluate(evaluator_input, threshold=0.0)
+    assert overridden.label == "relevant"
+
+    after = evaluator.evaluate(evaluator_input)
+    assert after.label == "not_relevant"
+    assert evaluator._threshold == 0.999999
+
+
+def test_evaluate_rejects_out_of_range_per_call_threshold() -> None:
+    evaluator = RelevanceEvaluator()
+    evaluator_input = RelevanceEvaluatorInput(_RELEVANT_INPUT, _RELEVANT_OUTPUT)
+    with pytest.raises(ValueError):
+        evaluator.evaluate(evaluator_input, threshold=1.5)
+    with pytest.raises(ValueError):
+        evaluator.evaluate(evaluator_input, threshold=-0.1)
+
+
 # -- malformed input -------------------------------------------------------
 
 
