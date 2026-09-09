@@ -1,11 +1,11 @@
 """services/worker settings, same `pydantic-settings`/env-var pattern as
 `apps/api/app/config.py` (see docs/decisions/005-evaluation-job-storage-worker.md
 section 12), scoped for now to what has actually been built: ClickHouse
-`evaluation_results` storage and PostgreSQL `evaluation_jobs` lifecycle/
-claiming. Dispatch/retry/reaper/poller settings
-(`max_concurrent_evaluations`, `evaluator_call_timeout_seconds`,
-`retry_base_seconds`, etc.) belong to the later phases that introduce that
-behavior, not here.
+`evaluation_results` storage, PostgreSQL `evaluation_jobs` lifecycle/
+claiming, and `worker.dispatcher.Dispatcher`'s bounded concurrency. Retry/
+reaper/poller settings (`evaluator_call_timeout_seconds`,
+`retry_base_seconds`, `stuck_job_threshold_seconds`, etc.) belong to the
+later phases that introduce that behavior, not here.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     # prefixed `postgresql+psycopg://` one, though it points at the same
     # local database by default.
     database_url: str = "postgresql://vigil:vigil@localhost:5434/vigil"
+
+    # Bounded-concurrency dispatch (worker/dispatcher.py). Deliberately
+    # small by default, not unbounded -- ADR 005 section 12's "a project
+    # operator... should not silently get full-volume evaluation" posture,
+    # applied here to worker-process resource usage rather than per-project
+    # sampling. Must be >= 1; Dispatcher itself also enforces this.
+    max_concurrent_evaluations: int = 4
 
 
 settings = Settings()
