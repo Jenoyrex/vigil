@@ -561,3 +561,89 @@ narrow that boundary.
 No WikiQA-derived number is introduced or promoted as a result of this amendment — `DEFAULT_THRESHOLD
 = 0.5` in both evaluators remains the same unvalidated placeholder section 12 already named, now
 reachable as the per-call fallback (`threshold=None`) as well as the constructor-time default.
+
+## Amendment (Phase 3E): failure classification, retry/backoff, dead-letter
+
+Sections 1 and 8 already established the 5-state job model and the shape of the retry/dead-letter
+transitions in the abstract; section 6's original failure-mode table left "backoff calculation is the
+caller's responsibility" unresolved, deferred to "the not-yet-built dispatch layer." Phase 3E is that
+layer: `services/worker/worker/failure_handling.py`, invoked from `worker/dispatcher.py` when
+`worker/execution.py`'s `execute_job` raises. This amendment documents the concrete rules now
+implemented — `execute_job`'s own evaluate → ClickHouse-write → PostgreSQL-succeeded ordering
+(section 9's plan, unchanged) and every existing SQL statement in `worker/postgres/repository.py`
+(unchanged) are both untouched by this amendment.
+
+**Error classification** — exactly two exception types are **permanent** (dead-lettered immediately,
+regardless of remaining retry budget); every other exception `execute_job` can raise is **retryable**:
+
+| Failure | Classification | Why |
+|---|---|---|
+| ClickHouse unavailable / rejected query or insert (span fetch or result write) | Retryable | Transient infrastructure failure |
+| PostgreSQL unavailable, where the failure can actually be recorded | Retryable | Transient infrastructure failure |
+| Source span missing (`SourceSpanNotFoundError`) | **Permanent** | The identical `(project_id, trace_id, span_id)` lookup returns the identical "not found" on every retry — no later attempt can observe different state |
+| Evaluator/version not found (`UnknownEvaluatorError`) | Retryable | Protects a worker fleet mid rolling-deploy — a later attempt, once the deploy completes, may find the version installed |
+| Generic exception raised inside `evaluate()` | Retryable | Benefit of the doubt for transient causes (e.g. resource contention under bounded concurrency) |
+| Malformed evaluator input (`InvalidEvaluatorInputError`) | **Permanent** | A structural adapter/contract violation — the same span content produces the same malformed input on every retry |
+| Unexpected/unclassified Python exception | Retryable (default) | Deliberately simple default rather than an enumerated taxonomy — bounded by `max_retries` regardless |
+
+The organizing principle is not an enumerated taxonomy for its own sake: an exception is permanent
+only when an identical retry of the identical job is *guaranteed* to observe the identical failure.
+Everything else defaults to retryable, including exception types this module has never seen before.
+
+**`max_retries` is a total-attempt cap, not a count of retries after the first attempt** —
+`evaluation_job.py`'s own docstring already established this ("only once `attempt_count >= max_retries`
+does the next failure move to the terminal `dead_letter` state"); this amendment applies that literally,
+not a re-derived convention. With `max_retries = 3`: attempt 1 fails → `attempt_count = 1 < 3` →
+`failed`; attempt 2 fails → `attempt_count = 2 < 3` → `failed`; attempt 3 fails →
+`attempt_count = 3 >= 3` → `dead_letter`. Three total attempts, not four. A **permanent** failure
+skips this budget check entirely and dead-letters on the very first attempt it occurs on, at any
+`attempt_count`.
+
+**Retry/backoff formula**:
+
+```
+delay_seconds = min(
+    retry_max_delay_seconds,
+    retry_base_seconds * (2 ** (attempt_count - 1))
+) + random.uniform(0, retry_jitter_seconds)
+
+next_attempt_at = now() + delay_seconds
+```
+
+`attempt_count` is already 1-indexed at the moment of failure (this attempt's own claim already
+incremented it); the `- 1` is what makes the *first* failure use exactly `retry_base_seconds`, not
+double it — attempt 1 → base, attempt 2 → 2× base, attempt 3 → 4× base, doubling each time, capped at
+`retry_max_delay_seconds` before jitter. Jitter is genuinely random (`random.uniform`, not a fixed
+offset) specifically to avoid a thundering-herd reclaim spike when many jobs fail at the same moment
+(e.g. one ClickHouse outage failing an entire in-flight batch simultaneously) — without it, every
+affected job would become re-claimable at the identical instant. V1 defaults, `worker/config.py`:
+`retry_base_seconds = 5.0`, `retry_max_delay_seconds = 300.0` (5 minutes), `retry_jitter_seconds = 2.0`
+— giving attempt 1 ≈ 5s, attempt 2 ≈ 10s, attempt 3 ≈ 20s, attempt 4 ≈ 40s, ... before the 300s cap,
+each plus up to 2s of jitter. No WikiQA-derived or otherwise unvalidated production number is involved
+here; these are operational timing defaults, changeable via environment variable with no code change,
+per this document's existing configuration-ease precedent (section 12).
+
+**Stale fenced update behavior, reaffirmed**: `mark_failed`/`mark_dead_letter` (`worker/postgres/repository.py`,
+unchanged by this amendment) already return `False` when the fencing predicate
+(`id = job_id AND status = 'running' AND attempt_count = claimed_attempt_count`) matches zero rows —
+meaning some newer attempt (a future reaper's reclaim, not yet built) already owns this job.
+`worker/failure_handling.py`'s `handle_execution_failure` treats a `False` return exactly like
+`mark_succeeded`'s existing convention: not an error, never raised, never retried as a statement — the
+caller (`Dispatcher`) surfaces it via `FailureHandlingOutcome.recorded = False` and moves on.
+
+**Where this logic lives, and why**: neither `execute_job` nor `Dispatcher` gained classification or
+backoff logic — both already stated, before this amendment, that they make no such decision. A new,
+narrow module (`worker/failure_handling.py`) owns `is_retryable`, `compute_next_attempt_at`, and
+`handle_execution_failure`; `Dispatcher` calls it from exactly one place (`_run_one`'s exception
+handler), reusing the same task-local `jobs_repository` `execute_job` was already given via
+`worker/resources.py`'s per-task resource provider (section 6/Phase 3D's resource-ownership amendment)
+— never a second, separately-resolved connection. If recording the failure itself raises (PostgreSQL
+unreachable at the exact moment of trying to record a ClickHouse-caused failure — a rare compound
+failure), `Dispatcher` degrades to leaving the job's row untouched, identical to this system's
+pre-Phase-3E behavior for every failure, rather than crashing `dispatch()` or losing the original
+exception (still reported via `DispatchOutcome.error`).
+
+**What remains out of scope**: a genuine process crash (not a catchable Python exception) still leaves
+a job stuck `running` until a stuck-job reaper exists — this amendment closes the "retryable failure
+never resolves" gap only for the catchable-exception path; the reaper itself, the poller, and the
+worker main loop remain future phases, unchanged from every prior phase's stated scope.

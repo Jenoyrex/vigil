@@ -63,13 +63,30 @@ genuinely shared and reused across every task, unlike the per-task ClickHouse/Po
 Tests inject a fixed fake bundle via `contextlib.nullcontext` -- the same provider mechanism, no
 special-casing.
 
+**Phase 3E** added `worker/failure_handling.py`: `is_retryable` classifies an exception `execute_job`
+raised (permanent -- dead-letter immediately -- only for `SourceSpanNotFoundError` and
+`InvalidEvaluatorInputError`; everything else, including unclassified exception types, is retryable by
+default); `compute_next_attempt_at` implements the exponential-backoff-with-jitter formula (attempt 1
+≈ 5s, attempt 2 ≈ 10s, attempt 3 ≈ 20s, ... capped at 300s, `worker/config.py`'s `retry_base_seconds`/
+`retry_max_delay_seconds`/`retry_jitter_seconds`); `handle_execution_failure` applies the resulting
+`mark_failed` (retry budget remains) or `mark_dead_letter` (budget exhausted, or a permanent failure at
+any attempt count) transition, using the exact `job.attempt_count` fencing token already established in
+Phase 3B -- never re-read or recomputed. `max_retries` is a **total-attempt cap**
+(`evaluation_job.py`'s own docstring already established this): with `max_retries=3`, three total
+attempts occur before dead-lettering, not four. `Dispatcher` now calls `handle_execution_failure` from
+`_run_one`'s exception handler (using the same task-local `jobs_repository` `execute_job` was already
+given), and `DispatchOutcome` gained a `failure_handling` field reporting the result -- `None` if
+resource acquisition itself failed, or if recording the failure raised in turn (a rare compound
+failure that degrades to leaving the job's row untouched, never a crash of `dispatch()`). See ADR 005's
+Phase 3E amendment for the full classification table and formula derivation.
+
 ## What this package is not (yet)
 
 - **Not a runnable worker.** No poller, no main/daemon loop that claims a batch and calls
-  `Dispatcher.dispatch` repeatedly, no retry/backoff calculation, and no stuck-job reaper exist yet --
-  see ADR 005 sections 6-8 for what those will look like when built. `Dispatcher` runs one already-
-  claimed batch to completion and returns; nothing yet calls it on a loop or decides what to do with a
-  `DispatchOutcome.error`.
+  `Dispatcher.dispatch` repeatedly, and no stuck-job reaper exist yet -- see ADR 005 sections 6-8 for
+  what those will look like when built. A genuine process crash (not a catchable Python exception)
+  still leaves a job stuck `running` forever until the reaper exists; Phase 3E only closes that gap for
+  the catchable-exception path.
 - **No `evaluation_poller_checkpoint` access, no poller, no internal-API calls, no `apps/api`
   job-creation endpoint.** None of these exist yet anywhere in this repository.
 - **No new evaluator algorithms, no sampling dispatch, no config-mutation API.**
@@ -118,3 +135,11 @@ proving the "Attempt to execute concurrent queries" failure does not recur -- pl
 tests: each resource-provider call gets its own PostgreSQL connection (closed on exit), and several
 threads can resolve resources and query ClickHouse concurrently via a `threading.Barrier` with no
 error. All skipped automatically if either store is unreachable.
+
+`tests/test_failure_handling.py` covers classification, backoff (deterministic component via a
+patched `random.uniform`), and `handle_execution_failure` against the real `EvaluationJobsRepository`
+wrapped around a fake connection (exact SQL/parameters, not just "some method was called").
+`tests/test_failure_handling_postgres_integration.py` proves the same transitions against a real
+claimed row -- retryable-with-budget, budget-exhausted, permanent-at-attempt-1, a two-cycle
+reclaim-then-dead-letter sequence, and the stale-fencing race -- skipped automatically if PostgreSQL is
+unreachable.
