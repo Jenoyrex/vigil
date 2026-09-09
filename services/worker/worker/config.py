@@ -2,10 +2,10 @@
 `apps/api/app/config.py` (see docs/decisions/005-evaluation-job-storage-worker.md
 section 12), scoped for now to what has actually been built: ClickHouse
 `evaluation_results` storage, PostgreSQL `evaluation_jobs` lifecycle/
-claiming, and `worker.dispatcher.Dispatcher`'s bounded concurrency. Retry/
-reaper/poller settings (`evaluator_call_timeout_seconds`,
-`retry_base_seconds`, `stuck_job_threshold_seconds`, etc.) belong to the
-later phases that introduce that behavior, not here.
+claiming, `worker.dispatcher.Dispatcher`'s bounded concurrency, and
+`worker.failure_handling`'s retry/backoff. Reaper/poller settings
+(`evaluator_call_timeout_seconds`, `stuck_job_threshold_seconds`, etc.)
+belong to the later phases that introduce that behavior, not here.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     # applied here to worker-process resource usage rather than per-project
     # sampling. Must be >= 1; Dispatcher itself also enforces this.
     max_concurrent_evaluations: int = 4
+
+    # Retry/backoff (worker/failure_handling.py), per
+    # docs/decisions/005-evaluation-job-storage-worker.md's Phase 3E
+    # amendment: delay_seconds = min(retry_max_delay_seconds,
+    # retry_base_seconds * (2 ** (attempt_count - 1))) +
+    # random.uniform(0, retry_jitter_seconds). Attempt 1 -> ~5s, attempt 2
+    # -> ~10s, attempt 3 -> ~20s, ... capped at 300s before jitter.
+    retry_base_seconds: float = 5.0
+    retry_max_delay_seconds: float = 300.0
+    retry_jitter_seconds: float = 2.0
 
 
 settings = Settings()

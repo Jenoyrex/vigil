@@ -103,16 +103,19 @@ class FakeResultsRepository:
 
 
 class FakeJobsRepository:
-    """`mark_failed`/`mark_dead_letter`/`claim_jobs` are `Mock()` spies with
-    no implementation -- if the dispatcher ever calls any of them, the
-    corresponding test's `call_count == 0` assertion fails immediately.
+    """`mark_failed`/`mark_dead_letter` are `Mock()` spies (returning `True`
+    by default, i.e. "recorded") so tests can assert exactly how and how
+    often each was called -- including asserting zero calls, for the cases
+    where neither should happen. `claim_jobs` is a `Mock()` with no return
+    value configured; `Dispatcher` must never call it at all, so no test
+    needs it to do anything.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.mark_succeeded_calls: list[tuple[uuid.UUID, int]] = []
-        self.mark_failed = Mock()
-        self.mark_dead_letter = Mock()
+        self.mark_failed = Mock(return_value=True)
+        self.mark_dead_letter = Mock(return_value=True)
         self.claim_jobs = Mock()
 
     def mark_succeeded(self, *, job_id: uuid.UUID, claimed_attempt_count: int) -> bool:
@@ -278,22 +281,119 @@ def test_missing_span_is_captured_as_a_structured_failure() -> None:
     assert jobs_repository.mark_succeeded_calls == []
 
 
-# -- dispatcher never performs failure-management/claiming -----------------
+# -- dispatcher invokes failure handling on execute_job failure ------------
+#
+# Phase 3D's Dispatcher never called mark_failed/mark_dead_letter at all --
+# a failed job's row was left untouched. Phase 3E's worker.failure_handling
+# changes that: Dispatcher now calls handle_execution_failure (with the same
+# task-local jobs_repository execute_job was given) whenever execute_job
+# raises. These tests deliberately invert the Phase 3D-era assertion that
+# used to live here (test_dispatcher_never_calls_mark_failed_or_mark_dead_letter)
+# -- that premise no longer holds, by design.
 
 
-def test_dispatcher_never_calls_mark_failed_or_mark_dead_letter() -> None:
-    jobs = [_job(span_id=f"span-{i}") for i in range(3)]
-    spans = {job.span_id: _span(job.span_id) for job in jobs}
-    failing_text = spans[jobs[0].span_id]["input"]
-    evaluator = FakeEvaluator(fail_for=frozenset({failing_text}))
+def test_dispatcher_calls_mark_failed_for_a_retryable_failure_with_budget_remaining() -> None:
+    jobs = [_job(span_id="span-a", attempt_count=1)]  # max_retries=3, well below cap
+    spans = {jobs[0].span_id: _span(jobs[0].span_id)}
+    evaluator = FakeEvaluator(fail_for=frozenset({spans[jobs[0].span_id]["input"]}))
     dispatcher, _, jobs_repository = _make_dispatcher(
         max_concurrent_evaluations=2, evaluator=evaluator, spans=spans
     )
 
-    dispatcher.dispatch(jobs)
+    [outcome] = dispatcher.dispatch(jobs)
 
-    jobs_repository.mark_failed.assert_not_called()
+    jobs_repository.mark_failed.assert_called_once()
     jobs_repository.mark_dead_letter.assert_not_called()
+    call_kwargs = jobs_repository.mark_failed.call_args.kwargs
+    assert call_kwargs["job_id"] == jobs[0].id
+    assert call_kwargs["claimed_attempt_count"] == 1
+
+    assert outcome.succeeded is False
+    assert outcome.failure_handling is not None
+    assert outcome.failure_handling.new_status == "failed"
+    assert outcome.failure_handling.recorded is True
+
+
+def test_dispatcher_calls_mark_dead_letter_when_retry_budget_exhausted() -> None:
+    jobs = [_job(span_id="span-a", attempt_count=3)]  # max_retries=3 -- this IS the cap
+    spans = {jobs[0].span_id: _span(jobs[0].span_id)}
+    evaluator = FakeEvaluator(fail_for=frozenset({spans[jobs[0].span_id]["input"]}))
+    dispatcher, _, jobs_repository = _make_dispatcher(
+        max_concurrent_evaluations=2, evaluator=evaluator, spans=spans
+    )
+
+    [outcome] = dispatcher.dispatch(jobs)
+
+    jobs_repository.mark_dead_letter.assert_called_once()
+    jobs_repository.mark_failed.assert_not_called()
+    assert outcome.failure_handling.new_status == "dead_letter"
+
+
+def test_dispatcher_dead_letters_a_permanent_failure_immediately() -> None:
+    """A missing span is permanent (worker.failure_handling.is_retryable),
+    so it must be dead-lettered on the very first attempt, regardless of
+    how much retry budget remains."""
+    job = _job(span_id="missing-span", attempt_count=1)  # max_retries=3, budget untouched
+    dispatcher, _, jobs_repository = _make_dispatcher(
+        max_concurrent_evaluations=2, evaluator=FakeEvaluator(), spans={}
+    )
+
+    [outcome] = dispatcher.dispatch([job])
+
+    jobs_repository.mark_dead_letter.assert_called_once()
+    jobs_repository.mark_failed.assert_not_called()
+    assert outcome.failure_handling.new_status == "dead_letter"
+
+
+def test_dispatch_outcome_failure_handling_is_none_on_success() -> None:
+    jobs = [_job(span_id="span-a")]
+    spans = {jobs[0].span_id: _span(jobs[0].span_id)}
+    dispatcher, _, _ = _make_dispatcher(
+        max_concurrent_evaluations=2, evaluator=FakeEvaluator(), spans=spans
+    )
+
+    [outcome] = dispatcher.dispatch(jobs)
+
+    assert outcome.succeeded is True
+    assert outcome.failure_handling is None
+
+
+def test_dispatcher_degrades_gracefully_when_recording_the_failure_itself_fails() -> None:
+    """Compound failure: execute_job raises, and then recording that
+    failure (mark_failed/mark_dead_letter) *also* raises -- e.g. PostgreSQL
+    became unreachable at the exact moment of trying to record a
+    ClickHouse-caused failure. dispatch() must still return a complete,
+    non-crashing DispatchOutcome: the original error is preserved, and
+    failure_handling reports None (could not be recorded) rather than
+    raising out of dispatch() entirely.
+    """
+    job = _job(span_id="span-a", attempt_count=1)
+    spans = {job.span_id: _span(job.span_id)}
+    evaluator = FakeEvaluator(fail_for=frozenset({spans[job.span_id]["input"]}))
+    dispatcher, _, jobs_repository = _make_dispatcher(
+        max_concurrent_evaluations=2, evaluator=evaluator, spans=spans
+    )
+    jobs_repository.mark_failed.side_effect = RuntimeError("PostgreSQL unreachable")
+
+    [outcome] = dispatcher.dispatch([job])
+
+    assert outcome.succeeded is False
+    assert isinstance(outcome.error, RuntimeError)
+    assert "synthetic evaluator failure" in str(outcome.error)
+    assert outcome.failure_handling is None
+
+
+def test_dispatch_outcome_has_the_expected_fields() -> None:
+    """Structural guard, updated for Phase 3E: DispatchOutcome now carries
+    `failure_handling` alongside the original three fields -- this replaces
+    Phase 3D's `test_dispatch_outcome_has_no_retry_or_backoff_fields`, whose
+    premise (no such field will ever exist) this phase deliberately
+    supersedes.
+    """
+    import dataclasses
+
+    field_names = {f.name for f in dataclasses.fields(DispatchOutcome)}
+    assert field_names == {"job", "evaluation_outcome", "error", "failure_handling"}
 
 
 def test_dispatcher_never_claims_jobs() -> None:
@@ -306,16 +406,6 @@ def test_dispatcher_never_claims_jobs() -> None:
     dispatcher.dispatch(jobs)
 
     jobs_repository.claim_jobs.assert_not_called()
-
-
-def test_dispatch_outcome_has_no_retry_or_backoff_fields() -> None:
-    """Structural guard: DispatchOutcome must never grow a next_attempt_at/
-    backoff-shaped field -- that computation belongs to a later phase, not
-    here."""
-    import dataclasses
-
-    field_names = {f.name for f in dataclasses.fields(DispatchOutcome)}
-    assert field_names == {"job", "evaluation_outcome", "error"}
 
 
 # -- resource-provider dependency injection ---------------------------------
