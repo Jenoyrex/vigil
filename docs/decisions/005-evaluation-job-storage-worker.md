@@ -716,3 +716,86 @@ loop, cron, or the same process as the not-yet-built dispatcher poller) is not d
 amendment, matching how `claim_jobs`'s own polling cadence is also not yet decided elsewhere in this
 codebase. No new terminal state, no Redis/queue, no evaluator change, and no execution timeout were
 introduced.
+
+## Amendment (Phase 3G): worker runtime / polling loop
+
+Sections 6-8 described claiming, dispatch, and the stuck-job reaper as mechanisms; none of them, until
+this amendment, ran continuously as a process. `worker/runtime.py`'s `WorkerRuntime` is that process
+harness: claim a batch (`EvaluationJobsRepository.claim_jobs`, unmodified) → dispatch it
+(`Dispatcher.dispatch`, unmodified) → periodically reap (`reap_stuck_jobs`, unmodified, on its own
+`reaper_interval_seconds` cadence, independent of the claim loop's own `poll_interval_seconds`) → sleep
+if idle, interruptibly, until `SIGTERM`/`SIGINT`. `worker/__main__.py` wires `Settings` →
+`EvaluatorRegistry` → `Dispatcher` → `WorkerRuntime`, so `python -m worker` is a complete worker
+process. This is deliberately distinct from this document's section 7 "Poller" (spans → job creation),
+which remains unbuilt and blocked on `apps/api`'s job-creation endpoint; `WorkerRuntime` only ever
+operates on `evaluation_jobs` rows that already exist.
+
+**Loop shape**: reap once at startup (safe — idempotent and fenced, per Phase 3F's own concurrency
+proof, which does not depend on being the only reaper running), then repeat: claim-and-dispatch, maybe
+reap (tracked via `time.monotonic()`, never wall-clock time, so a system clock adjustment can't skew
+the interval), then an interruptible idle wait if nothing was claimed. The stop flag is checked between
+every phase — between claim and reap, and between reap and the idle wait — so a shutdown request in
+flight never triggers one more unit of unnecessary work.
+
+**Busy vs. idle pacing**: if `claim_jobs` returned any jobs, the loop continues immediately with no
+sleep — there may be more queued work. If the claim was empty (or failed), the loop waits
+`poll_interval_seconds` via `self._stop_event.wait(timeout)`, not `time.sleep()` — a
+`threading.Event.wait` with a timeout returns immediately once the event is set, so a shutdown signal
+wakes an idle loop instantly instead of waiting out the full interval.
+
+**Connection lifecycle**: `WorkerRuntime` never holds a PostgreSQL connection across `dispatch()` or
+across the idle wait. Each claim tick and each reap tick opens exactly one fresh connection via an
+injected `jobs_connection_factory` (production: `worker.postgres.client.get_connection`, the existing
+`autocommit=True`, one-connection-per-call convention, unmodified), uses it for exactly one
+`EvaluationJobsRepository` call, and closes it before the next phase begins — `Dispatcher.dispatch`
+resolves its own, separate per-job connections independently via its existing `resource_provider`.
+
+**Dependency injection**: `WorkerRuntime` is constructed with an already-built `Dispatcher`, a
+`jobs_connection_factory`, a `worker_id`, and every timing/batch setting — it never constructs
+`EvaluatorRegistry` or `Dispatcher` itself (`worker/__main__.py`'s job), mirroring `Dispatcher`'s own
+`ResourceProvider` injection point exactly. This is what lets tests exercise the loop's scheduling
+logic (busy/idle pacing, reap cadence, shutdown timing) against fakes, with no real database or
+evaluator involved.
+
+**`worker_id`**: `generate_worker_id()` returns `hostname:pid:short-uuid`, computed once per process at
+startup and reused for every `claim_jobs` call that process makes for its entire lifetime — this is the
+exact value that lands in `evaluation_jobs.claimed_by`, which `worker.reaper`'s diagnostic messages
+(Phase 3F) already surface for stuck-job forensics.
+
+**`claim_batch_size` and `max_concurrent_evaluations` are independent settings, not coupled in code.**
+Both default to `4` today (nothing sits queued waiting for a `Dispatcher` thread if they match), but
+`claim_batch_size` governs how many jobs one claim tick pulls and `max_concurrent_evaluations` governs
+how many `Dispatcher` runs concurrently — two different knobs that happen to share a starting value,
+retunable independently via their own environment variables.
+
+**Signals**: `SIGTERM`/`SIGINT` handlers do nothing but call `request_stop()`, which sets an
+already-constructed `threading.Event` — no database work, no logging side effects beyond what
+`request_stop`'s caller already does, inside a signal handler. `signal.signal` only works from a
+process's main thread in Python, so `WorkerRuntime.run()` must be called from the main thread; this is
+documented as a hard constraint on the class, not merely a suggestion.
+
+**Config**, `worker/config.py`: `claim_batch_size = 4`, `poll_interval_seconds = 2.0`,
+`reaper_interval_seconds = 60.0` — following the existing `VIGIL_WORKER_`-prefixed settings convention,
+alongside Phase 3F's already-existing `stuck_job_threshold_seconds = 900.0` and `reaper_batch_size =
+100`, reused unchanged. `reaper_interval_seconds = 60.0` against `stuck_job_threshold_seconds = 900.0`
+means a stuck job is caught within at most ~60 seconds of crossing the threshold — a small addition on
+top of an already-conservative number.
+
+**Known limitation, not closed by this amendment**: `Dispatcher.dispatch()`'s `ThreadPoolExecutor`
+waits for every submitted evaluation to complete before returning. Without a per-call evaluator timeout
+(`evaluator_call_timeout_seconds`, named in section 12 as planned but still unimplemented anywhere in
+this codebase), a single hung `evaluate()` call blocks that process's claim/dispatch tick indefinitely
+— including its ability to notice a shutdown request and exit gracefully. `stuck_job_threshold_seconds`
+mitigates the *database* consequence (another worker process, or this one after an eventual restart,
+reclaims the row), but does nothing for *this* process's own liveness while stuck; an orchestrator
+would eventually have to force-kill it. Closing this requires per-call timeout enforcement inside
+`Dispatcher`/`worker/execution.py` — a future phase, deliberately out of scope here, exactly as it was
+excluded from Phase 3F's stuck-job reaper. Neither `Dispatcher.dispatch()` nor `worker/execution.py`
+was modified by this amendment.
+
+**What remains out of scope**: no metrics system, no HTTP health/readiness endpoint, and no heartbeat
+file were introduced — V1 observability is the existing `logging.getLogger(__name__)` convention (one
+aggregated line per non-empty dispatch tick, one per non-empty reap tick) plus process supervision
+(restart on crash/exit). Horizontal scaling (running multiple `WorkerRuntime` processes) needed no new
+design here — `claim_jobs`'s `SKIP LOCKED` and the reaper's fencing (Phase 3F) already make that safe
+by construction, and this amendment adds no locking around claim or reap.

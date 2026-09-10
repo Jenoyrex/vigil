@@ -3,10 +3,12 @@
 section 12), scoped for now to what has actually been built: ClickHouse
 `evaluation_results` storage, PostgreSQL `evaluation_jobs` lifecycle/
 claiming, `worker.dispatcher.Dispatcher`'s bounded concurrency,
-`worker.failure_handling`'s retry/backoff, and `worker.reaper`'s stuck-job
-reclaim. Poller/main-loop settings (`evaluator_call_timeout_seconds`, a
-reaper polling interval, etc.) belong to the later phases that introduce
-that behavior, not here.
+`worker.failure_handling`'s retry/backoff, `worker.reaper`'s stuck-job
+reclaim, and `worker.runtime.WorkerRuntime`'s claim/dispatch/reap loop.
+`evaluator_call_timeout_seconds` (a per-call evaluator timeout) remains
+unimplemented anywhere in this codebase -- a future phase, not this one; see
+`worker/runtime.py`'s module docstring for the known limitation that leaves
+open.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -61,6 +63,20 @@ class Settings(BaseSettings):
     # source for it.
     stuck_job_threshold_seconds: float = 900.0
     reaper_batch_size: int = 100
+
+    # Worker runtime loop (worker/runtime.py), per docs/decisions/005-
+    # evaluation-job-storage-worker.md's Phase 3G amendment. claim_batch_size
+    # is deliberately independent of max_concurrent_evaluations -- both
+    # default to 4 today, but they are separate knobs (how many jobs one
+    # claim tick pulls vs. how many `Dispatcher` runs concurrently) and are
+    # never coupled in code, so either can be retuned without touching the
+    # other. poll_interval_seconds is how long an idle claim tick waits
+    # before trying again; reaper_interval_seconds is the runtime loop's own,
+    # separate cadence for calling reap_stuck_jobs, tracked via
+    # time.monotonic() rather than wall-clock time.
+    claim_batch_size: int = 4
+    poll_interval_seconds: float = 2.0
+    reaper_interval_seconds: float = 60.0
 
 
 settings = Settings()
