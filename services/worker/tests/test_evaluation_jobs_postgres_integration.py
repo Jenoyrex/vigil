@@ -379,11 +379,19 @@ def test_mark_succeeded_stale_attempt_cannot_overwrite_a_reaped_newer_attempt(
     real_pg_connection,
 ) -> None:
     """Simulates the exact race the fencing token exists to prevent: a
-    worker claims a job (attempt_count -> 1), a reaper (not yet built)
-    later resets it -- incrementing attempt_count and moving it back to
-    'failed' -- and only then does the original, now-stale attempt finish
-    and try to mark it succeeded. That must be rejected, not silently
-    accepted.
+    worker claims a job (attempt_count -> 1), a reaper (worker/reaper.py,
+    Phase 3F) later resets it back to 'failed' -- and only then does the
+    original, now-stale attempt finish and try to mark it succeeded. That
+    must be rejected, not silently accepted.
+
+    Per worker/reaper.py's module docstring / ADR 005's Phase 3F amendment,
+    the real reaper deliberately does NOT increment attempt_count (only
+    claim_jobs ever does -- see that module for why incrementing it again
+    here would double-charge the retry budget). This test simulates that
+    accurately: attempt_count is left unchanged, status alone changes. The
+    fencing predicate (status = 'running' AND attempt_count = ...) still
+    correctly rejects the stale attempt purely on the status mismatch,
+    proving attempt_count staying the same doesn't weaken the fence.
     """
     project_id = _insert_project(real_pg_connection)
     job_id = _insert_job(real_pg_connection, project_id=project_id)
@@ -393,9 +401,10 @@ def test_mark_succeeded_stale_attempt_cannot_overwrite_a_reaped_newer_attempt(
     assert claimed.attempt_count == 1
 
     # Simulate a reaper resetting this stuck-looking job directly (the
-    # reaper itself is out of scope for this phase).
+    # actual reaper is exercised end-to-end in
+    # test_reaper_postgres_integration.py).
     real_pg_connection.execute(
-        "UPDATE evaluation_jobs SET status = 'failed', attempt_count = 2 WHERE id = %(id)s",
+        "UPDATE evaluation_jobs SET status = 'failed' WHERE id = %(id)s",
         {"id": job_id},
     )
 
@@ -404,7 +413,7 @@ def test_mark_succeeded_stale_attempt_cannot_overwrite_a_reaped_newer_attempt(
 
     row = _fetch_job(real_pg_connection, job_id)
     assert row["status"] == "failed"
-    assert row["attempt_count"] == 2
+    assert row["attempt_count"] == 1
 
 
 def test_mark_succeeded_accepts_a_current_attempt(real_pg_connection) -> None:
@@ -422,6 +431,12 @@ def test_mark_succeeded_accepts_a_current_attempt(real_pg_connection) -> None:
 def test_mark_failed_stale_attempt_cannot_overwrite_a_reaped_newer_attempt(
     real_pg_connection,
 ) -> None:
+    """Same simulated race as
+    test_mark_succeeded_stale_attempt_cannot_overwrite_a_reaped_newer_attempt,
+    for the mark_failed path: the reaper's dead_letter transition leaves
+    attempt_count unchanged (see that test's docstring / worker/reaper.py) --
+    status alone is what fences out the stale worker's own mark_failed call.
+    """
     project_id = _insert_project(real_pg_connection)
     job_id = _insert_job(real_pg_connection, project_id=project_id)
 
@@ -429,7 +444,7 @@ def test_mark_failed_stale_attempt_cannot_overwrite_a_reaped_newer_attempt(
     [claimed] = repo.claim_jobs(worker_id="worker-a", batch_size=10)
 
     real_pg_connection.execute(
-        "UPDATE evaluation_jobs SET status = 'dead_letter', attempt_count = 4 WHERE id = %(id)s",
+        "UPDATE evaluation_jobs SET status = 'dead_letter' WHERE id = %(id)s",
         {"id": job_id},
     )
 
@@ -443,7 +458,7 @@ def test_mark_failed_stale_attempt_cannot_overwrite_a_reaped_newer_attempt(
 
     row = _fetch_job(real_pg_connection, job_id)
     assert row["status"] == "dead_letter"
-    assert row["attempt_count"] == 4
+    assert row["attempt_count"] == 1
 
 
 def test_mark_dead_letter_stale_attempt_cannot_overwrite_a_reaped_newer_attempt(

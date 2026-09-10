@@ -215,7 +215,14 @@ def test_reclaimed_job_can_eventually_be_dead_lettered_across_retries(real_pg_co
 def test_stale_attempt_cannot_overwrite_a_reaped_newer_attempt(real_pg_connection) -> None:
     """The exact race the fencing token exists to prevent, reached through
     handle_execution_failure this time (Phase 3B already proved this
-    directly against mark_failed/mark_dead_letter)."""
+    directly against mark_failed/mark_dead_letter).
+
+    Per worker/reaper.py (Phase 3F) / ADR 005's Phase 3F amendment, the real
+    reaper deliberately leaves attempt_count unchanged at reclaim -- only
+    claim_jobs ever increments it. This simulates that accurately: status
+    alone changes, proving the fencing predicate rejects the stale attempt
+    purely on the status mismatch, not because attempt_count also differs.
+    """
     project_id = _insert_project(real_pg_connection)
     job_id = _insert_job(real_pg_connection, project_id=project_id, max_retries=3)
     jobs_repository = EvaluationJobsRepository(real_pg_connection)
@@ -223,10 +230,11 @@ def test_stale_attempt_cannot_overwrite_a_reaped_newer_attempt(real_pg_connectio
     [claimed] = jobs_repository.claim_jobs(worker_id="w1", batch_size=1)
     assert claimed.attempt_count == 1
 
-    # Simulate a reaper resetting this job (not yet built) between claim
-    # and this (now-stale) worker's failure-handling call.
+    # Simulate a reaper resetting this job's status (worker/reaper.py is
+    # exercised end-to-end in test_reaper_postgres_integration.py) between
+    # claim and this (now-stale) worker's failure-handling call.
     real_pg_connection.execute(
-        "UPDATE evaluation_jobs SET status = 'dead_letter', attempt_count = 4 WHERE id = %(id)s",
+        "UPDATE evaluation_jobs SET status = 'dead_letter' WHERE id = %(id)s",
         {"id": job_id},
     )
 
@@ -237,4 +245,4 @@ def test_stale_attempt_cannot_overwrite_a_reaped_newer_attempt(real_pg_connectio
     assert outcome.recorded is False
     row = _fetch_job(real_pg_connection, job_id)
     assert row["status"] == "dead_letter"
-    assert row["attempt_count"] == 4  # untouched by the stale attempt
+    assert row["attempt_count"] == 1  # untouched by both the reaper and the stale attempt

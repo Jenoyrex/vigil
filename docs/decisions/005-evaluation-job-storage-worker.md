@@ -647,3 +647,72 @@ exception (still reported via `DispatchOutcome.error`).
 a job stuck `running` until a stuck-job reaper exists — this amendment closes the "retryable failure
 never resolves" gap only for the catchable-exception path; the reaper itself, the poller, and the
 worker main loop remain future phases, unchanged from every prior phase's stated scope.
+
+## Amendment (Phase 3F): stuck-job reaper
+
+Section 8 originally sketched the reaper as `SET status = 'failed', attempt_count = attempt_count + 1
+WHERE status = 'running' AND claimed_at < now() - :stuck_threshold`. Phase 3F implements this
+properly — `services/worker/worker/reaper.py`'s `reap_stuck_jobs`, invoked with a batch of
+`EvaluationJobsRepository.select_stuck_jobs` results — and **corrects that sketch's `attempt_count`
+handling**: `attempt_count` is *not* incremented at reclaim.
+
+**`attempt_count` semantics, reaffirmed and made explicit**: `attempt_count` means "number of
+execution attempts `claim_jobs` has started." `claim_jobs` is the *only* operation that increments it,
+and it does so before execution begins, not after completion. A job stuck `running` has therefore
+already had its current attempt counted — the claim that got it stuck already incremented
+`attempt_count` once, independent of whether the worker that claimed it ever finishes. Incrementing it
+a second time at reclaim would double-charge the retry budget against a single real attempt once the
+job is legitimately re-claimed and `attempt_count` is incremented again by `claim_jobs` — contradicting
+Phase 3E's own total-attempts contract. With `max_retries = 3`: `claim_jobs` takes the job to
+`attempt_count = 1` (attempt 1); if that attempt gets stuck and is reaped, `attempt_count` stays `1`;
+the next `claim_jobs` call takes it to `attempt_count = 2` (attempt 2); if attempt 2 also gets stuck
+and is reaped, `attempt_count` stays `2`; the next `claim_jobs` call takes it to `attempt_count = 3`
+(attempt 3); only if attempt 3 also fails or gets stuck (`attempt_count(3) >= max_retries(3)`) does the
+job dead-letter. Three total attempts, exactly as Phase 3E already established for the ordinary
+caught-exception path — a stuck attempt is one of the three, not an extra charge on top of them.
+
+**`select_stuck_jobs`** (new, `worker/postgres/repository.py`): `SELECT id, attempt_count,
+max_retries, claimed_by, claimed_at FROM evaluation_jobs WHERE status = 'running' AND claimed_at <
+now() - make_interval(secs => :stuck_threshold_seconds) ORDER BY claimed_at LIMIT :batch_size FOR
+UPDATE SKIP LOCKED` — batched and skip-locked so concurrent reapers partition work, mirroring
+`claim_jobs`'s existing pattern. `reap_stuck_jobs` then applies the *identical* boundary check and
+backoff formula Phase 3E's `handle_execution_failure` already established (`attempt_count >=
+max_retries` → `mark_dead_letter`; else → `mark_failed` with `next_attempt_at =
+compute_next_attempt_at(attempt_count)`, the same function, not a re-derived one), and calls the
+existing, **unmodified** `mark_failed`/`mark_dead_letter` methods to perform the write. No new SQL
+write statement exists anywhere in this amendment, and no second retry/backoff policy was introduced.
+
+**Fencing**: correctness relies entirely on `mark_failed`/`mark_dead_letter`'s pre-existing `WHERE
+status = 'running' AND attempt_count = claimed_attempt_count` predicate (unchanged). The reclaim's
+transition of `status` away from `'running'` is by itself sufficient to make any later stale completion
+from the crashed worker (`mark_succeeded`, `mark_failed`, or `mark_dead_letter`, using that worker's
+own captured `claimed_attempt_count`) match zero rows — the `status = 'running'` clause alone fails to
+match once the reaper has committed, independent of whether `attempt_count` also changed. This means
+`select_stuck_jobs` and the subsequent fenced write need not share one transaction or hold a lock
+across the gap between them: while a row's `status` remains `'running'`, nothing other than `claim_jobs`
+ever touches `attempt_count`, so the value `select_stuck_jobs` observed cannot go stale except by the
+row leaving `'running'` entirely — which the fenced write already handles correctly as a no-op.
+Two concurrent reapers, a worker completing while a reaper runs, and a worker failing while a reaper
+runs are all decided by ordinary PostgreSQL row-level locking (first committer wins; the loser's fenced
+UPDATE matches zero rows) — no explicit application-level locking beyond `SKIP LOCKED`'s existing
+work-partitioning role in `select_stuck_jobs`.
+
+**Reclaim transition** — identical for both branches except the terminal status/`next_attempt_at`:
+`claimed_at`/`claimed_by` are left **unchanged** (not nulled) — preserved as a forensic trail of the
+last worker that held the job, overwritten naturally by the next real `claim_jobs` call for the
+`failed` branch, and permanently preserved for `dead_letter` since that row is never claimed again.
+`last_error` is a bounded, reaper-authored diagnostic (`"stuck-job reaper: job claimed by {claimed_by}
+at {claimed_at} exceeded stuck_job_threshold_seconds={threshold} without a completion report"`),
+following the same `_MAX_LAST_ERROR_LENGTH = 2000` convention `worker/failure_handling.py` already
+established.
+
+**Config**, `worker/config.py`: `stuck_job_threshold_seconds = 900.0` (15 minutes — must be
+meaningfully larger than however long a genuine evaluation can legitimately take; no per-call evaluator
+timeout is enforced yet, so this default is conservative until one exists) and `reaper_batch_size =
+100`, following the existing `VIGIL_WORKER_`-prefixed settings convention.
+
+**What remains out of scope**: scheduling/wiring `reap_stuck_jobs` into a running process (a periodic
+loop, cron, or the same process as the not-yet-built dispatcher poller) is not decided by this
+amendment, matching how `claim_jobs`'s own polling cadence is also not yet decided elsewhere in this
+codebase. No new terminal state, no Redis/queue, no evaluator change, and no execution timeout were
+introduced.
