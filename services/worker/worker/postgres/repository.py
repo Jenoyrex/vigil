@@ -66,6 +66,51 @@ _CLAIM_RETURNING_COLUMNS = (
     "created_at",
 )
 
+
+@dataclass(frozen=True)
+class StuckJob:
+    """One row `select_stuck_jobs` found still `running` long after it was
+    claimed -- the worker that claimed it is presumed dead (crashed, killed,
+    or lost connectivity) rather than merely slow, per `stuck_job_threshold_seconds`
+    being configured meaningfully larger than any genuine evaluator call can
+    take (docs/decisions/005-evaluation-job-storage-worker.md section 8).
+    `attempt_count`/`max_retries` are carried through so
+    `worker.reaper.reap_stuck_jobs` can apply the identical retry-budget
+    boundary check `worker.failure_handling.handle_execution_failure` already
+    applies to an ordinary caught failure. Deliberately a minimal shape,
+    not a reuse of `ClaimedJob` -- a reaper never runs `execute_job`, so it
+    never needs project_id/trace_id/span_id/evaluator_name/evaluator_version/
+    created_at.
+    """
+
+    id: uuid.UUID
+    attempt_count: int
+    max_retries: int
+    claimed_by: str | None
+    claimed_at: datetime
+
+
+# Column order `select_stuck_jobs`'s SELECT produces -- same one-named-tuple
+# discipline `_CLAIM_RETURNING_COLUMNS` already establishes.
+_SELECT_STUCK_JOBS_COLUMNS = (
+    "id",
+    "attempt_count",
+    "max_retries",
+    "claimed_by",
+    "claimed_at",
+)
+
+_SELECT_STUCK_JOBS_SQL = f"""
+    SELECT
+        {", ".join(_SELECT_STUCK_JOBS_COLUMNS)}
+    FROM evaluation_jobs
+    WHERE status = 'running'
+      AND claimed_at < now() - make_interval(secs => %(stuck_threshold_seconds)s)
+    ORDER BY claimed_at
+    LIMIT %(batch_size)s
+    FOR UPDATE SKIP LOCKED
+"""
+
 _CLAIM_JOBS_SQL = f"""
     UPDATE evaluation_jobs
     SET
@@ -89,11 +134,13 @@ _CLAIM_JOBS_SQL = f"""
 
 # The attempt_count fencing invariant (docs/decisions/005... Phase 3 plan
 # section 3): a completion transition only ever takes effect if the row is
-# still owned by the exact attempt that is completing it. If a stuck-job
-# reaper (not yet built) has since reset this row -- incrementing
-# attempt_count and moving it back to 'failed' or on to 'dead_letter' --
-# this WHERE clause matches zero rows, and the caller must treat that as
-# "this attempt's result is stale, drop it" rather than raise or retry the
+# still owned by the exact attempt that is completing it. If the stuck-job
+# reaper (worker/reaper.py, Phase 3F) has since reclaimed this row -- moving
+# it back to 'failed' or on to 'dead_letter' (attempt_count deliberately left
+# unchanged; only claim_jobs ever increments it -- see worker/reaper.py's
+# module docstring) -- the `status = 'running'` half of this WHERE clause
+# alone already matches zero rows, and the caller must treat that as "this
+# attempt's result is stale, drop it" rather than raise or retry the
 # statement.
 _MARK_SUCCEEDED_SQL = """
     UPDATE evaluation_jobs
@@ -145,6 +192,31 @@ class EvaluationJobsRepository:
         )
         return [
             ClaimedJob(**dict(zip(_CLAIM_RETURNING_COLUMNS, row, strict=True)))
+            for row in cursor.fetchall()
+        ]
+
+    def select_stuck_jobs(
+        self, *, stuck_threshold_seconds: float, batch_size: int
+    ) -> list[StuckJob]:
+        """Find up to `batch_size` `running` jobs whose `claimed_at` is older
+        than `stuck_threshold_seconds` -- presumed abandoned by a crashed
+        worker (worker/reaper.py's `reap_stuck_jobs`, Phase 3F). `FOR UPDATE
+        SKIP LOCKED`, exactly like `claim_jobs`, so two concurrent reapers
+        partition a batch rather than both selecting the same rows -- purely
+        a work-partitioning optimization, not a correctness dependency: the
+        actual fencing against a stale worker's later completion lives
+        entirely in `mark_failed`/`mark_dead_letter`'s own
+        `WHERE status = 'running' AND attempt_count = claimed_attempt_count`
+        predicate (unchanged by this method), which the caller invokes
+        afterward -- this SELECT and that UPDATE need not share one
+        transaction for correctness.
+        """
+        cursor = self._connection.execute(
+            _SELECT_STUCK_JOBS_SQL,
+            {"stuck_threshold_seconds": stuck_threshold_seconds, "batch_size": batch_size},
+        )
+        return [
+            StuckJob(**dict(zip(_SELECT_STUCK_JOBS_COLUMNS, row, strict=True)))
             for row in cursor.fetchall()
         ]
 

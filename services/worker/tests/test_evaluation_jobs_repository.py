@@ -109,6 +109,78 @@ def test_claim_jobs_returns_empty_list_when_nothing_claimable(fake_postgres_conn
     assert repo.claim_jobs(worker_id="worker-1", batch_size=5) == []
 
 
+# -- select_stuck_jobs -------------------------------------------------------
+
+
+def test_select_stuck_jobs_passes_threshold_and_batch_size(fake_postgres_connection) -> None:
+    repo = EvaluationJobsRepository(fake_postgres_connection)
+    repo.select_stuck_jobs(stuck_threshold_seconds=900.0, batch_size=50)
+
+    assert fake_postgres_connection.last_params == {
+        "stuck_threshold_seconds": 900.0,
+        "batch_size": 50,
+    }
+
+
+def test_select_stuck_jobs_filters_running_past_claimed_at_threshold(
+    fake_postgres_connection,
+) -> None:
+    repo = EvaluationJobsRepository(fake_postgres_connection)
+    repo.select_stuck_jobs(stuck_threshold_seconds=900.0, batch_size=50)
+
+    query = fake_postgres_connection.last_query
+    assert "status = 'running'" in query
+    assert "claimed_at < now() - make_interval(secs => %(stuck_threshold_seconds)s)" in query
+
+
+def test_select_stuck_jobs_uses_for_update_skip_locked(fake_postgres_connection) -> None:
+    repo = EvaluationJobsRepository(fake_postgres_connection)
+    repo.select_stuck_jobs(stuck_threshold_seconds=900.0, batch_size=50)
+
+    assert "FOR UPDATE SKIP LOCKED" in fake_postgres_connection.last_query
+
+
+def test_select_stuck_jobs_orders_by_claimed_at(fake_postgres_connection) -> None:
+    repo = EvaluationJobsRepository(fake_postgres_connection)
+    repo.select_stuck_jobs(stuck_threshold_seconds=900.0, batch_size=50)
+
+    assert "ORDER BY claimed_at" in fake_postgres_connection.last_query
+
+
+def test_select_stuck_jobs_never_writes_attempt_count(fake_postgres_connection) -> None:
+    """select_stuck_jobs is read-only -- it must not appear in the same
+    statement as any attempt_count mutation (that stays claim_jobs' sole
+    responsibility, per worker/reaper.py's module docstring)."""
+    repo = EvaluationJobsRepository(fake_postgres_connection)
+    repo.select_stuck_jobs(stuck_threshold_seconds=900.0, batch_size=50)
+
+    query = fake_postgres_connection.last_query
+    assert query.strip().upper().startswith("SELECT")
+    assert "attempt_count =" not in query
+
+
+def test_select_stuck_jobs_maps_returned_rows_to_stuck_job(fake_postgres_connection) -> None:
+    claimed_at = datetime(2026, 9, 9, 12, 0, 0, tzinfo=UTC)
+    fake_postgres_connection.queue_result(
+        rows=[(JOB_ID, 2, 3, "worker-a", claimed_at)],
+    )
+    repo = EvaluationJobsRepository(fake_postgres_connection)
+    stuck = repo.select_stuck_jobs(stuck_threshold_seconds=900.0, batch_size=50)
+
+    assert len(stuck) == 1
+    job = stuck[0]
+    assert job.id == JOB_ID
+    assert job.attempt_count == 2
+    assert job.max_retries == 3
+    assert job.claimed_by == "worker-a"
+    assert job.claimed_at == claimed_at
+
+
+def test_select_stuck_jobs_returns_empty_list_when_nothing_stuck(fake_postgres_connection) -> None:
+    repo = EvaluationJobsRepository(fake_postgres_connection)
+    assert repo.select_stuck_jobs(stuck_threshold_seconds=900.0, batch_size=50) == []
+
+
 # -- mark_succeeded / mark_failed / mark_dead_letter: fencing clause --------
 
 

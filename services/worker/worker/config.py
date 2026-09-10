@@ -2,10 +2,11 @@
 `apps/api/app/config.py` (see docs/decisions/005-evaluation-job-storage-worker.md
 section 12), scoped for now to what has actually been built: ClickHouse
 `evaluation_results` storage, PostgreSQL `evaluation_jobs` lifecycle/
-claiming, `worker.dispatcher.Dispatcher`'s bounded concurrency, and
-`worker.failure_handling`'s retry/backoff. Reaper/poller settings
-(`evaluator_call_timeout_seconds`, `stuck_job_threshold_seconds`, etc.)
-belong to the later phases that introduce that behavior, not here.
+claiming, `worker.dispatcher.Dispatcher`'s bounded concurrency,
+`worker.failure_handling`'s retry/backoff, and `worker.reaper`'s stuck-job
+reclaim. Poller/main-loop settings (`evaluator_call_timeout_seconds`, a
+reaper polling interval, etc.) belong to the later phases that introduce
+that behavior, not here.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,6 +48,19 @@ class Settings(BaseSettings):
     retry_base_seconds: float = 5.0
     retry_max_delay_seconds: float = 300.0
     retry_jitter_seconds: float = 2.0
+
+    # Stuck-job reaper (worker/reaper.py), per docs/decisions/005-evaluation-
+    # job-storage-worker.md's Phase 3F amendment. stuck_job_threshold_seconds
+    # must be meaningfully larger than however long a genuine, alive
+    # evaluation can take, so the reaper only catches real process death,
+    # never a call that's merely slow -- no per-call evaluator timeout is
+    # enforced yet (see this module's own docstring), so this default is
+    # deliberately conservative until one exists. reaper_batch_size mirrors
+    # claim_jobs' own batch_size argument, given a config default here since,
+    # unlike claim_jobs' worker-loop caller, the reaper has no other natural
+    # source for it.
+    stuck_job_threshold_seconds: float = 900.0
+    reaper_batch_size: int = 100
 
 
 settings = Settings()
