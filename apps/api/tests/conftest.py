@@ -159,20 +159,44 @@ def fake_analytics_repository() -> FakeAnalyticsRepository:
     return FakeAnalyticsRepository()
 
 
+class FakeEvaluationsQueryRepository:
+    """In-memory stand-in for
+    app.clickhouse.evaluations_query_repository.EvaluationsQueryRepository."""
+
+    def __init__(self) -> None:
+        self.get_span_evaluations_calls: list[dict[str, Any]] = []
+        self.get_span_evaluations_result: list[dict[str, Any]] = []
+        self.fail_with: Exception | None = None
+
+    def get_span_evaluations(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.get_span_evaluations_calls.append(kwargs)
+        if self.fail_with is not None:
+            raise self.fail_with
+        return self.get_span_evaluations_result
+
+
+@pytest.fixture
+def fake_evaluations_query_repository() -> FakeEvaluationsQueryRepository:
+    return FakeEvaluationsQueryRepository()
+
+
 @pytest.fixture
 def client(
     db_session: Session,
     fake_repository: FakeSpansRepository,
     fake_traces_query_repository: FakeTracesQueryRepository,
     fake_analytics_repository: FakeAnalyticsRepository,
+    fake_evaluations_query_repository: FakeEvaluationsQueryRepository,
 ) -> Generator[TestClient, None, None]:
     """A TestClient wired to the test Postgres database and fake ClickHouse
-    repositories (ingestion + read-side query/analytics) -- suitable for
-    auth/validation/transformation tests that should never touch a real
-    ClickHouse server. See test_traces_clickhouse_integration.py and
-    test_query_clickhouse_integration.py for the tests that do.
+    repositories (ingestion + read-side query/analytics/evaluations) --
+    suitable for auth/validation/transformation tests that should never
+    touch a real ClickHouse server. See test_traces_clickhouse_integration.py,
+    test_query_clickhouse_integration.py, and
+    test_evaluations_clickhouse_integration.py for the tests that do.
     """
     from app.api.v1.analytics import get_analytics_repository
+    from app.api.v1.evaluations import get_evaluations_query_repository
     from app.api.v1.traces import get_spans_repository, get_traces_query_repository
     from app.db.session import get_db
     from app.main import app
@@ -184,6 +208,9 @@ def client(
     app.dependency_overrides[get_spans_repository] = lambda: fake_repository
     app.dependency_overrides[get_traces_query_repository] = lambda: fake_traces_query_repository
     app.dependency_overrides[get_analytics_repository] = lambda: fake_analytics_repository
+    app.dependency_overrides[get_evaluations_query_repository] = lambda: (
+        fake_evaluations_query_repository
+    )
     try:
         with TestClient(app) as test_client:
             yield test_client
