@@ -10,10 +10,20 @@ fake does too.
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+# worker.config.Settings.internal_service_token (Phase 3H) has no Python
+# default by design (docs/decisions/005-evaluation-job-storage-worker.md
+# section 9) -- it must come from the environment in every environment,
+# tests included. Set before any `from worker...` import anywhere triggers
+# Settings() instantiation. apps/api/tests/conftest.py sets the identical
+# value under its own VIGIL_API_ prefix, so cross-service tests share one
+# secret.
+os.environ.setdefault("VIGIL_WORKER_INTERNAL_SERVICE_TOKEN", "test-internal-service-token")
 
 
 class FakeChResult:

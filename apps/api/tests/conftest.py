@@ -8,6 +8,15 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
+# app.config.Settings.internal_service_token (Phase 3H) has no Python
+# default by design (docs/decisions/005-evaluation-job-storage-worker.md
+# section 9) -- it must come from the environment in every environment,
+# tests included. Set before any `from app...` import anywhere in this file
+# or in a collected test module triggers Settings() instantiation.
+# services/worker/tests/conftest.py sets the identical value under its own
+# VIGIL_WORKER_ prefix, so cross-service tests share one secret.
+os.environ.setdefault("VIGIL_API_INTERNAL_SERVICE_TOKEN", "test-internal-service-token")
+
 TEST_DATABASE_URL = os.environ.get(
     "VIGIL_API_TEST_DATABASE_URL",
     "postgresql+psycopg://vigil:vigil@localhost:5434/vigil_test",

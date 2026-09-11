@@ -33,5 +33,13 @@ class Settings(BaseSettings):
     default_query_window_hours: int = 24
     max_spans_per_trace_response: int = 2000
 
+    # Internal worker-fleet authentication (POST /v1/evaluations/jobs), per
+    # docs/decisions/005-evaluation-job-storage-worker.md section 9 / Phase
+    # 3H amendment. Deliberately no default -- must be supplied via
+    # environment/.env in every environment, local development included,
+    # never baked into source. services/worker's own Settings holds the
+    # same value under its own VIGIL_WORKER_ prefix.
+    internal_service_token: str
+
 
 settings = Settings()
