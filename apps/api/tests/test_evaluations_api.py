@@ -1,28 +1,44 @@
-"""API tests for POST /v1/evaluations/jobs -- ADR 005 sections 9/10, Phase
-3H amendment.
+"""API tests for the evaluations surface.
+
+`POST /v1/evaluations/jobs` (ADR 005 sections 9/10, Phase 3H amendment) is
+internal-token-only. Every other test class in this file is Phase 3I
+(customer-facing: `evaluator_configs` CRUD, evaluation-job status list,
+span-scoped evaluation-results read) -- `Authorization: Bearer`, never
+`X-Vigil-Internal-Token`.
 
 Uses the `client` fixture (real Postgres test DB, fake
-TracesQueryRepository) exactly like test_traces_api.py-style tests already
-do for the customer-facing endpoints -- `get_traces_query_repository` is
-imported and reused directly from app.api.v1.traces (not redefined) so the
-SAME fixture override already wired in tests/conftest.py's `client` fixture
-covers this new route too.
+TracesQueryRepository/EvaluationsQueryRepository) exactly like
+test_traces_api.py-style tests already do for the customer-facing endpoints
+-- the relevant `get_*_repository` dependency is imported and reused
+directly from its owning route module (not redefined) so the SAME fixture
+overrides already wired in tests/conftest.py's `client` fixture cover these
+routes too.
 """
 
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
-from app.db.models import EvaluationJob
-from test_models import make_evaluator_config, make_organization, make_project
+from app.db.models import EvaluationJob, EvaluatorConfig
+from test_models import (
+    make_evaluation_job,
+    make_evaluator_config,
+    make_organization,
+    make_project,
+)
 
 INTERNAL_TOKEN_HEADER = "X-Vigil-Internal-Token"
 VALID_INTERNAL_TOKEN = "test-internal-service-token"  # matches conftest.py's os.environ.setdefault
 
 TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736"
 SPAN_ID = "00f067aa0ba902b7"
+
+
+def _auth_headers(active_api_key) -> dict[str, str]:
+    return {"Authorization": f"Bearer {active_api_key.raw_key}"}
 
 
 def _payload(*, project_id: uuid.UUID, **overrides) -> dict:
@@ -309,3 +325,476 @@ def test_threshold_is_never_snapshotted(
     )
     assert response.status_code == 201
     assert not hasattr(EvaluationJob, "threshold")
+
+
+# =============================================================================
+# Phase 3I: customer-facing evaluations API (get_current_api_key, never
+# X-Vigil-Internal-Token)
+# =============================================================================
+
+
+# -- evaluator_configs CRUD ---------------------------------------------------
+
+
+def test_list_configs_requires_customer_auth(client) -> None:
+    response = client.get("/v1/evaluations/configs")
+    assert response.status_code == 401
+
+
+def test_list_configs_internal_token_does_not_authenticate(client, active_api_key) -> None:
+    """The internal worker token must not satisfy a customer-facing route --
+    structurally separate boundaries, proven both directions (the reverse
+    is already proven by test_customer_api_key_does_not_authenticate_this_endpoint
+    above, for POST /v1/evaluations/jobs)."""
+    response = client.get(
+        "/v1/evaluations/configs", headers={INTERNAL_TOKEN_HEADER: VALID_INTERNAL_TOKEN}
+    )
+    assert response.status_code == 401
+
+
+def test_list_configs_empty_when_none_configured(client, active_api_key) -> None:
+    response = client.get("/v1/evaluations/configs", headers=_auth_headers(active_api_key))
+    assert response.status_code == 200
+    assert response.json() == {"configs": []}
+
+
+def test_list_configs_returns_configured_evaluators(
+    client, db_session: Session, active_api_key
+) -> None:
+    make_evaluator_config(db_session, active_api_key.project, evaluator_name="relevance")
+    make_evaluator_config(db_session, active_api_key.project, evaluator_name="relevance_embedding")
+
+    response = client.get("/v1/evaluations/configs", headers=_auth_headers(active_api_key))
+    assert response.status_code == 200
+    names = {config["evaluator_name"] for config in response.json()["configs"]}
+    assert names == {"relevance", "relevance_embedding"}
+
+
+def test_list_configs_scoped_to_project(client, db_session: Session, active_api_key) -> None:
+    other_project = _make_project(db_session)
+    make_evaluator_config(db_session, other_project, evaluator_name="relevance")
+
+    response = client.get("/v1/evaluations/configs", headers=_auth_headers(active_api_key))
+    assert response.status_code == 200
+    assert response.json() == {"configs": []}
+
+
+def test_get_config_404_when_not_configured(client, active_api_key) -> None:
+    response = client.get(
+        "/v1/evaluations/configs/relevance", headers=_auth_headers(active_api_key)
+    )
+    assert response.status_code == 404
+
+
+def test_get_config_returns_existing(client, db_session: Session, active_api_key) -> None:
+    make_evaluator_config(
+        db_session,
+        active_api_key.project,
+        evaluator_name="relevance",
+        enabled=True,
+        sampling_rate=0.5,
+        threshold=0.42,
+        max_retries=5,
+    )
+
+    response = client.get(
+        "/v1/evaluations/configs/relevance", headers=_auth_headers(active_api_key)
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["evaluator_name"] == "relevance"
+    assert body["enabled"] is True
+    assert body["sampling_rate"] == 0.5
+    assert body["threshold"] == 0.42
+    assert body["max_retries"] == 5
+
+
+def test_get_config_scoped_to_project(client, db_session: Session, active_api_key) -> None:
+    """A config that exists, but for a different project, must 404 -- not
+    leak another tenant's configuration."""
+    other_project = _make_project(db_session)
+    make_evaluator_config(db_session, other_project, evaluator_name="relevance")
+
+    response = client.get(
+        "/v1/evaluations/configs/relevance", headers=_auth_headers(active_api_key)
+    )
+    assert response.status_code == 404
+
+
+def test_put_config_creates_new(client, active_api_key) -> None:
+    response = client.put(
+        "/v1/evaluations/configs/relevance",
+        json={"enabled": True, "sampling_rate": 0.25, "max_retries": 4},
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["evaluator_name"] == "relevance"
+    assert body["enabled"] is True
+    assert body["sampling_rate"] == 0.25
+    assert body["threshold"] is None
+    assert body["max_retries"] == 4
+
+
+def test_put_config_omitted_fields_use_documented_defaults(client, active_api_key) -> None:
+    """Full-replace (PUT) semantics: omitting sampling_rate/threshold/
+    max_retries resolves each to its own documented default -- the same
+    defaults evaluator_configs' own DB schema uses -- not an error."""
+    response = client.put(
+        "/v1/evaluations/configs/relevance",
+        json={"enabled": True},
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["sampling_rate"] == 0.1
+    assert body["threshold"] is None
+    assert body["max_retries"] == 3
+
+
+def test_put_config_is_idempotent(client, active_api_key) -> None:
+    payload = {"enabled": True, "sampling_rate": 0.5, "max_retries": 2}
+    first = client.put(
+        "/v1/evaluations/configs/relevance", json=payload, headers=_auth_headers(active_api_key)
+    )
+    second = client.put(
+        "/v1/evaluations/configs/relevance", json=payload, headers=_auth_headers(active_api_key)
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["created_at"] == second.json()["created_at"]
+
+
+def test_put_config_updates_existing_without_duplicating(
+    client, db_session: Session, active_api_key
+) -> None:
+    make_evaluator_config(
+        db_session, active_api_key.project, evaluator_name="relevance", enabled=False
+    )
+
+    response = client.put(
+        "/v1/evaluations/configs/relevance",
+        json={"enabled": True, "sampling_rate": 0.9, "max_retries": 1},
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    assert body["sampling_rate"] == 0.9
+
+    rows = (
+        db_session.query(EvaluatorConfig)
+        .filter(EvaluatorConfig.project_id == active_api_key.project.id)
+        .all()
+    )
+    assert len(rows) == 1  # never duplicated
+
+
+def test_put_config_omitting_a_previously_set_field_resets_it_to_default(
+    client, db_session: Session, active_api_key
+) -> None:
+    """PUT is full-replace, not partial patch: a prior custom sampling_rate
+    must NOT survive a later PUT that omits it."""
+    make_evaluator_config(
+        db_session, active_api_key.project, evaluator_name="relevance", sampling_rate=0.77
+    )
+
+    response = client.put(
+        "/v1/evaluations/configs/relevance",
+        json={"enabled": True},
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 200
+    assert response.json()["sampling_rate"] == 0.1
+
+
+def test_put_config_sampling_rate_above_one_is_422(client, active_api_key) -> None:
+    response = client.put(
+        "/v1/evaluations/configs/relevance",
+        json={"enabled": True, "sampling_rate": 1.5},
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 422
+
+
+def test_put_config_negative_max_retries_is_422(client, active_api_key) -> None:
+    response = client.put(
+        "/v1/evaluations/configs/relevance",
+        json={"enabled": True, "max_retries": -1},
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 422
+
+
+def test_put_config_missing_enabled_is_422(client, active_api_key) -> None:
+    """enabled has no default -- this endpoint IS the enable/disable
+    mechanism, so every call must state it explicitly."""
+    response = client.put(
+        "/v1/evaluations/configs/relevance",
+        json={"sampling_rate": 0.5},
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 422
+
+
+def test_put_config_does_not_affect_another_project(
+    client, db_session: Session, active_api_key
+) -> None:
+    other_project = _make_project(db_session)
+
+    response = client.put(
+        "/v1/evaluations/configs/relevance",
+        json={"enabled": True},
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 200
+
+    other_config = (
+        db_session.query(EvaluatorConfig)
+        .filter(EvaluatorConfig.project_id == other_project.id)
+        .first()
+    )
+    assert other_config is None
+
+
+# -- evaluation_jobs status list ----------------------------------------------
+
+
+def test_list_jobs_requires_customer_auth(client) -> None:
+    response = client.get("/v1/evaluations/jobs")
+    assert response.status_code == 401
+
+
+def test_list_jobs_internal_token_does_not_authenticate(client) -> None:
+    response = client.get(
+        "/v1/evaluations/jobs", headers={INTERNAL_TOKEN_HEADER: VALID_INTERNAL_TOKEN}
+    )
+    assert response.status_code == 401
+
+
+def test_list_jobs_empty(client, active_api_key) -> None:
+    response = client.get("/v1/evaluations/jobs", headers=_auth_headers(active_api_key))
+    assert response.status_code == 200
+    assert response.json() == {"jobs": [], "next_cursor": None}
+
+
+def test_list_jobs_returns_created_jobs(client, db_session: Session, active_api_key) -> None:
+    job = make_evaluation_job(db_session, active_api_key.project)
+
+    response = client.get("/v1/evaluations/jobs", headers=_auth_headers(active_api_key))
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["jobs"]) == 1
+    returned = body["jobs"][0]
+    assert returned["id"] == str(job.id)
+    assert returned["status"] == "pending"
+    assert returned["trace_id"] == job.trace_id
+    assert returned["span_id"] == job.span_id
+    assert returned["attempt_count"] == 0
+    assert returned["max_retries"] == 3
+
+
+def test_list_jobs_filters_by_status(client, db_session: Session, active_api_key) -> None:
+    make_evaluation_job(db_session, active_api_key.project, status="pending")
+    make_evaluation_job(db_session, active_api_key.project, status="dead_letter")
+
+    response = client.get(
+        "/v1/evaluations/jobs?status=dead_letter", headers=_auth_headers(active_api_key)
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["jobs"]) == 1
+    assert body["jobs"][0]["status"] == "dead_letter"
+
+
+def test_list_jobs_filters_by_evaluator_name(client, db_session: Session, active_api_key) -> None:
+    make_evaluation_job(db_session, active_api_key.project, evaluator_name="relevance")
+    make_evaluation_job(db_session, active_api_key.project, evaluator_name="relevance_embedding")
+
+    response = client.get(
+        "/v1/evaluations/jobs?evaluator_name=relevance_embedding",
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["jobs"]) == 1
+    assert body["jobs"][0]["evaluator_name"] == "relevance_embedding"
+
+
+def test_list_jobs_invalid_status_is_422(client, active_api_key) -> None:
+    response = client.get(
+        "/v1/evaluations/jobs?status=not-a-real-status", headers=_auth_headers(active_api_key)
+    )
+    assert response.status_code == 422
+
+
+def test_list_jobs_malformed_cursor_is_422(client, active_api_key) -> None:
+    response = client.get(
+        "/v1/evaluations/jobs?cursor=not-a-valid-cursor", headers=_auth_headers(active_api_key)
+    )
+    assert response.status_code == 422
+
+
+def test_list_jobs_ordered_most_recent_first(client, db_session: Session, active_api_key) -> None:
+    older = make_evaluation_job(db_session, active_api_key.project)
+    older.created_at = datetime.now(UTC) - timedelta(hours=1)
+    db_session.commit()
+    newer = make_evaluation_job(db_session, active_api_key.project)
+
+    response = client.get("/v1/evaluations/jobs", headers=_auth_headers(active_api_key))
+    assert response.status_code == 200
+    ids = [job["id"] for job in response.json()["jobs"]]
+    assert ids == [str(newer.id), str(older.id)]
+
+
+def test_list_jobs_paginates_with_cursor(client, db_session: Session, active_api_key) -> None:
+    for _ in range(3):
+        make_evaluation_job(db_session, active_api_key.project)
+
+    first_page = client.get("/v1/evaluations/jobs?limit=2", headers=_auth_headers(active_api_key))
+    assert first_page.status_code == 200
+    first_body = first_page.json()
+    assert len(first_body["jobs"]) == 2
+    assert first_body["next_cursor"] is not None
+
+    second_page = client.get(
+        f"/v1/evaluations/jobs?limit=2&cursor={first_body['next_cursor']}",
+        headers=_auth_headers(active_api_key),
+    )
+    assert second_page.status_code == 200
+    second_body = second_page.json()
+    assert len(second_body["jobs"]) == 1
+    assert second_body["next_cursor"] is None
+
+    first_page_ids = {job["id"] for job in first_body["jobs"]}
+    second_page_ids = {job["id"] for job in second_body["jobs"]}
+    assert first_page_ids.isdisjoint(second_page_ids)  # no overlap, no gap (3 jobs total)
+
+
+def test_list_jobs_scoped_to_project(client, db_session: Session, active_api_key) -> None:
+    other_project = _make_project(db_session)
+    make_evaluation_job(db_session, other_project)
+
+    response = client.get("/v1/evaluations/jobs", headers=_auth_headers(active_api_key))
+    assert response.status_code == 200
+    assert response.json() == {"jobs": [], "next_cursor": None}
+
+
+# -- evaluation_results, span-scoped ------------------------------------------
+
+
+def test_span_evaluations_requires_customer_auth(client) -> None:
+    response = client.get(f"/v1/traces/{TRACE_ID}/spans/{SPAN_ID}/evaluations")
+    assert response.status_code == 401
+
+
+def test_span_evaluations_internal_token_does_not_authenticate(client) -> None:
+    response = client.get(
+        f"/v1/traces/{TRACE_ID}/spans/{SPAN_ID}/evaluations",
+        headers={INTERNAL_TOKEN_HEADER: VALID_INTERNAL_TOKEN},
+    )
+    assert response.status_code == 401
+
+
+def test_span_evaluations_empty_when_none_evaluated(client, active_api_key) -> None:
+    response = client.get(
+        f"/v1/traces/{TRACE_ID}/spans/{SPAN_ID}/evaluations",
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 200
+    assert response.json() == {"results": []}
+
+
+def test_span_evaluations_returns_results(
+    client, active_api_key, fake_evaluations_query_repository
+) -> None:
+    # job_created_at/written_at are naive datetimes here, matching what a
+    # real clickhouse_connect client returns for DateTime64 columns (see
+    # app.services.evaluations._as_utc's docstring) -- not ISO strings.
+    evaluation_id = str(uuid.uuid4())
+    fake_evaluations_query_repository.get_span_evaluations_result = [
+        {
+            "evaluation_id": evaluation_id,
+            "trace_id": TRACE_ID,
+            "span_id": SPAN_ID,
+            "evaluator_name": "relevance",
+            "evaluator_version": "0.1.0",
+            "score": 0.87,
+            "label": "relevant",
+            "explanation": "cosine similarity above threshold",
+            "evaluator_model": "tfidf",
+            "evaluator_provider": None,
+            "evaluation_latency_ms": 3.35,
+            "evaluation_cost_usd": None,
+            "job_created_at": datetime(2026, 9, 11, 12, 0, 0),
+            "written_at": datetime(2026, 9, 11, 12, 0, 1),
+        }
+    ]
+
+    response = client.get(
+        f"/v1/traces/{TRACE_ID}/spans/{SPAN_ID}/evaluations",
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["results"]) == 1
+    result = body["results"][0]
+    assert result["evaluation_id"] == evaluation_id
+    assert result["evaluator_name"] == "relevance"
+    assert result["score"] == 0.87
+    assert result["evaluator_model"] == "tfidf"
+
+
+def test_span_evaluations_scopes_repository_call_by_project(
+    client, active_api_key, fake_evaluations_query_repository
+) -> None:
+    client.get(
+        f"/v1/traces/{TRACE_ID}/spans/{SPAN_ID}/evaluations",
+        headers=_auth_headers(active_api_key),
+    )
+    [call] = fake_evaluations_query_repository.get_span_evaluations_calls
+    assert call["project_id"] == active_api_key.project.id
+    assert call["trace_id"] == TRACE_ID
+    assert call["span_id"] == SPAN_ID
+
+
+def test_span_evaluations_malformed_trace_id_is_422(client, active_api_key) -> None:
+    response = client.get(
+        f"/v1/traces/not-valid-hex/spans/{SPAN_ID}/evaluations",
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 422
+
+
+def test_span_evaluations_malformed_span_id_is_422(client, active_api_key) -> None:
+    response = client.get(
+        f"/v1/traces/{TRACE_ID}/spans/too-short/evaluations",
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 422
+
+
+def test_span_evaluations_clickhouse_unavailable_is_503(
+    client, active_api_key, fake_evaluations_query_repository
+) -> None:
+    from app.clickhouse.repository import ClickHouseUnavailableError
+
+    fake_evaluations_query_repository.fail_with = ClickHouseUnavailableError("down")
+    response = client.get(
+        f"/v1/traces/{TRACE_ID}/spans/{SPAN_ID}/evaluations",
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 503
+
+
+def test_span_evaluations_clickhouse_query_error_is_500(
+    client, active_api_key, fake_evaluations_query_repository
+) -> None:
+    from app.clickhouse.query_common import ClickHouseQueryError
+
+    fake_evaluations_query_repository.fail_with = ClickHouseQueryError("bad query")
+    response = client.get(
+        f"/v1/traces/{TRACE_ID}/spans/{SPAN_ID}/evaluations",
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 500
