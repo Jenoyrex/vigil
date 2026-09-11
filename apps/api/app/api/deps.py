@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import hmac
 import uuid
 from dataclasses import dataclass
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.db.models import APIKey
 from app.db.session import get_db
 from app.security.api_keys import has_expected_key_shape, hash_api_key
@@ -82,3 +84,34 @@ def get_current_api_key(
     db.commit()
 
     return AuthenticatedKey(api_key_id=row.id, project_id=row.project_id)
+
+
+INTERNAL_TOKEN_HEADER = "X-Vigil-Internal-Token"
+
+_INVALID_INTERNAL_TOKEN_DETAIL = "Invalid or missing internal service token."
+
+
+def get_internal_service_auth(
+    x_vigil_internal_token: str | None = Header(default=None, alias=INTERNAL_TOKEN_HEADER),
+) -> None:
+    """Authenticate the internal worker fleet via a single shared secret --
+    docs/decisions/005-evaluation-job-storage-worker.md section 9, Phase 3H
+    amendment. Used solely by `POST /v1/evaluations/jobs`.
+
+    Structurally separate from `get_current_api_key` at every level, not
+    merely a different value: a dedicated header (`X-Vigil-Internal-Token`,
+    never `Authorization: Bearer`), compared with `hmac.compare_digest`
+    (constant-time) against `settings.internal_service_token`, and **never
+    touches the `api_keys` table at all**. This proves only "this caller is
+    the trusted internal worker process" -- it carries zero project scope
+    and returns nothing, unlike `AuthenticatedKey`. A customer's `vgl_*` key
+    cannot satisfy this check: it would have to be presented in this exact
+    header and match this exact secret byte-for-byte, which no `api_keys`
+    row ever does (this dependency doesn't even look).
+    """
+    if x_vigil_internal_token is None or not hmac.compare_digest(
+        x_vigil_internal_token, settings.internal_service_token
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_INTERNAL_TOKEN_DETAIL
+        )

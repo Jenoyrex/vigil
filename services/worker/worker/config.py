@@ -78,5 +78,38 @@ class Settings(BaseSettings):
     poll_interval_seconds: float = 2.0
     reaper_interval_seconds: float = 60.0
 
+    # Evaluation job poller (worker/poller.py), per docs/decisions/005-
+    # evaluation-job-storage-worker.md's Phase 3H amendment. poller_batch_size
+    # is independent of claim_batch_size -- unrelated queries against
+    # unrelated stores (a ClickHouse span scan vs. a Postgres job claim).
+    # poller_overlap_seconds deliberately re-scans a trailing window of
+    # already-advanced checkpoint history on every tick, to stay correct
+    # against same-millisecond ingested_at collisions (the common case for a
+    # batched span insert -- ClickHouse's now64() default is evaluated once
+    # per INSERT statement, not once per row) and ClickHouse's own
+    # insert-visibility lag, relying on idempotent job creation to make the
+    # redundant re-scan free rather than on a precise cursor. See
+    # worker/poller.py's module docstring for the full rationale.
+    # poller_start_time_lookback_days is a partition-pruning OPTIMIZATION
+    # ONLY (worker/clickhouse/eligible_span_repository.py's module
+    # docstring) -- never a correctness boundary, and never applied at all
+    # on the very first poll (no checkpoint yet), matching
+    # evaluation_poller_checkpoint's own documented "NULL means start from
+    # the beginning of the retention window" semantics.
+    poller_batch_size: int = 500
+    poller_overlap_seconds: float = 60.0
+    poller_start_time_lookback_days: int = 3
+    poller_interval_seconds: float = 30.0
+    poller_job_creation_timeout_seconds: float = 10.0
+
+    # Internal worker-fleet authentication (Phase 3H, ADR 005 section 9) --
+    # the worker side of the SAME shared secret apps/api's
+    # VIGIL_API_INTERNAL_SERVICE_TOKEN setting holds; both must be set to
+    # the identical value for the poller to authenticate. No default here
+    # either -- must be supplied via environment/.env in every environment,
+    # matching that setting's own no-baked-in-default requirement.
+    internal_service_token: str
+    api_base_url: str = "http://localhost:8000"
+
 
 settings = Settings()

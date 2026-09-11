@@ -799,3 +799,111 @@ aggregated line per non-empty dispatch tick, one per non-empty reap tick) plus p
 (restart on crash/exit). Horizontal scaling (running multiple `WorkerRuntime` processes) needed no new
 design here — `claim_jobs`'s `SKIP LOCKED` and the reaper's fencing (Phase 3F) already make that safe
 by construction, and this amendment adds no locking around claim or reap.
+
+## Amendment (Phase 3H): evaluation job poller / job-creation endpoint
+
+Sections 3, 6, 7, 9, and 10 already specified the poller's shape in the abstract — a worker-owned
+ClickHouse scan, an API-owned job-creation endpoint gated by an internal shared secret, a
+`(project_id, evaluator_name)`-scoped eligibility/sampling decision, and a checkpoint bounding re-scan
+without being a correctness mechanism. Phase 3H builds all of it: `apps/api`'s
+`POST /v1/evaluations/jobs` (`app/api/v1/evaluations.py` → `app/services/evaluations.py`) and
+`services/worker`'s `worker/poller.py` (`Poller`, run via the fully independent
+`python -m worker.poller` / `worker/poller_main.py` process, never `worker/runtime.py`, unmodified).
+
+**Internal authentication, exactly as section 9 specified**: `get_internal_service_auth`
+(`app/api/deps.py`), a new dependency sibling to `get_current_api_key`, reads
+`X-Vigil-Internal-Token`, compares with `hmac.compare_digest` against a new, default-less
+`VIGIL_API_INTERNAL_SERVICE_TOKEN` setting, and never touches `api_keys`. `services/worker` holds the
+identical secret value under its own `VIGIL_WORKER_INTERNAL_SERVICE_TOKEN` setting (also default-less)
+— both settings require the value to be supplied via environment/`.env` in every environment,
+including each service's own test suite (`apps/api/tests/conftest.py` and
+`services/worker/tests/conftest.py` each set the identical fixed test value via
+`os.environ.setdefault(...)`, before either service's `Settings()` singleton is ever constructed).
+
+**Job-creation service order, exactly as section 10 specified, checked once, in this order**:
+`evaluator_configs` lookup (`enabled`) → deterministic sampling → ground-truth ClickHouse verification
+(reusing `TracesQueryRepository.get_span`, unmodified — no new ClickHouse query was added to `apps/api`
+for this) → idempotent Postgres insert. The first two checks are local-Postgres-only and deliberately
+run before the ClickHouse round trip, since `not_enabled`/`not_sampled` are the overwhelmingly common
+outcomes at a 10% default `sampling_rate`. `evaluator_name`/`evaluator_version`/`max_retries` are
+snapshotted onto the created `evaluation_jobs` row exactly as section 1/2 already specified;
+`threshold` is deliberately never snapshotted — it continues to resolve at execution time via the
+existing, unmodified `EvaluatorConfigRepository`, per the Phase 3 planning amendment above.
+
+**Deterministic sampling** (`worker/sampling.py`'s `is_sampled_in`, independently duplicated —
+never imported — as `apps/api/app/services/evaluations.py`'s private `_is_sampled_in`, per ADR 001
+decision 6's cross-service boundary, the same reason `apps/api` has never imported
+`services/evaluator`): `sha256(f"{project_id}:{trace_id}:{span_id}:{evaluator_name}")`'s first 8 bytes,
+normalized to `[0, 1)`, compared against `sampling_rate` with `bucket < sampling_rate`.
+`evaluator_version` is deliberately excluded from the key — a version bump re-evaluates the identical
+population of already-sampled-in spans, not a freshly-randomized subset, matching section 3's stated
+intent that a version bump should produce new jobs for already-evaluated spans. Python's built-in
+`hash()` was deliberately rejected: it is salted per-process (`PYTHONHASHSEED`), so the same key would
+hash differently across `apps/api` restarts or horizontally-scaled instances, silently breaking the
+one guarantee this function exists to provide.
+
+**Checkpoint/watermark strategy — overlap window + idempotent insertion, not a composite cursor**:
+`evaluation_poller_checkpoint`'s existing single `last_ingested_at` column is unchanged; no schema
+migration was needed. The risk this resolves, verified directly against the actual schema rather than
+assumed: `spans`' ClickHouse `ORDER BY`/`PARTITION BY` is `(project_id, toDate(start_time), trace_id,
+span_id)` / `toDate(start_time)` — `ingested_at` is not part of that key, only the `ReplacingMergeTree`
+version column — and `ingested_at DEFAULT now64(3)` is evaluated once per `INSERT` statement, not once
+per row, so a batched span insert produces identical `ingested_at` values across every row in it:
+same-timestamp collisions are the common case for this table, not a rare edge case. A naive
+`ingested_at > checkpoint` watermark, advanced to a truncated batch's raw max, can therefore silently
+drop whatever else shares that exact timestamp but didn't fit in this tick's `LIMIT`; ClickHouse's own
+insert-visibility lag creates an analogous risk a composite `(ingested_at, span_id)` cursor cannot
+close on its own. `worker/poller.py` instead subtracts a fixed `poller_overlap_seconds` (default
+`60.0`) from the checkpoint at query time on every tick, relying on the already-existing
+`evaluation_jobs` unique constraint and `apps/api`'s idempotent "return the existing row" handling to
+make the resulting redundant re-scan free — **at-least-once discovery, idempotent creation**, not
+fragile exactly-once discovery, exactly the target this amendment was scoped to. Within one tick, rows
+are still ordered deterministically (`ORDER BY ingested_at, span_id`, no `OFFSET` anywhere), so a
+crash-before-checkpoint-advance retry re-scans an identical, reproducible batch.
+
+**`start_time >= :start_date_hint` (`worker/clickhouse/eligible_span_repository.py`) is a
+partition-pruning OPTIMIZATION ONLY, never a correctness boundary** — `spans`' primary index cannot
+accelerate a bare `ingested_at` filter at all, so this hint is what lets ClickHouse skip whole date
+partitions outside a plausible recent-ingestion range. It is derived from the checkpoint's own date
+(`observed_watermark.date() - poller_start_time_lookback_days`), never from wall-clock "today", and is
+omitted entirely on the very first poll (no checkpoint yet) — applying a "today"-derived hint on a
+fresh deployment would have silently pruned out any real un-scanned backlog older than the lookback
+window, contradicting `evaluation_poller_checkpoint`'s own documented "`NULL` means start from the
+beginning of the retention window" semantics.
+
+**Checkpoint advancement is all-or-nothing per tick**, unchanged from section 7's original rule: the
+checkpoint only advances if every `(span, evaluator)` pair scanned this tick resolved to one of exactly
+four reasons `apps/api` can return — `created`, `already_exists`, `not_enabled`, `not_sampled`. A
+transport failure, an unexpected status code, or a `404` (span not found / wrong project) all count as
+*unresolved* for this purpose — deliberately conservative: `404` is not one of the four literal
+definitive reasons, so a candidate that 404s is retried next tick rather than silently written off,
+even though in correct operation (the poller always asserts the `project_id` it itself read off the
+scanned row) a 404 should essentially never occur. If a process crashes after some job-creation calls
+succeeded but before the checkpoint advances, the next tick (this process restarted, or another) simply
+re-scans the same (overlap-widened) window and re-issues every call — already-created jobs no-op,
+anything not yet created gets created, and the checkpoint advances normally once the retried batch
+fully resolves. Zero data loss, zero duplicate jobs, bounded redundant work.
+
+**Concurrency — multiple poller processes are safe, with no distributed lock**:
+`worker/postgres/poller_checkpoint_repository.py`'s `advance_checkpoint` is a single optimistic-CAS
+`UPDATE` (`WHERE id = 'global' AND (last_ingested_at = :observed_watermark OR (:observed_watermark IS
+NULL AND last_ingested_at IS NULL))`), the identical fencing shape `mark_failed`/`mark_dead_letter`
+already use for `evaluation_jobs` rows. A lost CAS race (another poller already advanced the
+checkpoint) is logged and treated as success, never as an error, and never triggers a backward move —
+the checkpoint is never compared against or clamped by `new_watermark` on the losing side, because the
+losing side simply doesn't write at all. V1 operationally expects exactly one poller process; running
+more is a tested, documented, but not load-bearing capability, proven directly by a real two-thread,
+two-connection race against a live PostgreSQL checkpoint row.
+
+**Poller/worker-runtime independence**: `worker/poller.py`/`worker/poller_main.py` never import
+`worker/runtime.py`, and `worker/runtime.py` was not modified by this amendment. The two processes are
+coupled only through the `evaluation_jobs` table itself — the poller creates rows via the API,
+`WorkerRuntime`'s existing, unmodified `claim_jobs` call consumes them — matching this system's
+established "PostgreSQL is the queue" precedent (section 11) rather than any direct process-to-process
+coupling.
+
+**What remains out of scope**: no evaluator-timeout enforcement, no `Dispatcher`/`worker/execution.py`
+change, no metrics system, no HTTP health/readiness endpoint, no Redis/Kafka/new queue, no historical
+backfill, and no dashboard change were introduced by this amendment. Per-project checkpoints and
+per-evaluator span-type eligibility metadata remain plausible future refinements, not implemented here,
+since nothing currently depends on either.
