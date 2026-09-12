@@ -33,16 +33,40 @@ function requireEnv(name: "VIGIL_API_BASE_URL" | "VIGIL_API_KEY"): string {
 export type { QueryParams };
 
 /**
+ * Optional request body for a mutating call (currently only
+ * `PUT /v1/evaluations/configs/{evaluator_name}`). Omitted entirely ->
+ * plain `GET`, identical to every call site that predates this option --
+ * see `vigilFetch`'s own reasoning below for why this is additive, not a
+ * rewrite.
+ */
+export interface VigilFetchInit {
+  method?: "PUT";
+  body?: unknown;
+}
+
+/**
  * Fetch one path from the real Vigil API, attaching the server-side API
  * key. Never called from client code -- see the module docstring above.
  *
- * Deliberately does not log the request URL's query string, the response
- * body, or any header: query params can contain user-supplied filter text,
- * and response bodies are telemetry content (see "Avoid logging telemetry
- * payloads or credentials" in the BFF proxy requirements). On failure, only
- * the path and status code are logged.
+ * `init` is an additive, optional third parameter: every pre-existing call
+ * site (`vigilFetch(path, params)`, implicitly `GET`) is untouched by this
+ * signature change. Only a caller that explicitly passes
+ * `{ method: "PUT", body }` gets a JSON-encoded request body and a
+ * `Content-Type` header -- see `lib/api/evaluations.ts`'s
+ * `upsertEvaluatorConfig`, the one caller that does.
+ *
+ * Deliberately does not log the request URL's query string, the request or
+ * response body, or any header: query params can contain user-supplied
+ * filter text, and request/response bodies are telemetry or configuration
+ * content (see "Avoid logging telemetry payloads or credentials" in the BFF
+ * proxy requirements). On failure, only the path and status code are
+ * logged.
  */
-export async function vigilFetch<T>(path: string, params?: QueryParams): Promise<T> {
+export async function vigilFetch<T>(
+  path: string,
+  params?: QueryParams,
+  init?: VigilFetchInit,
+): Promise<T> {
   const baseUrl = requireEnv("VIGIL_API_BASE_URL");
   const apiKey = requireEnv("VIGIL_API_KEY");
 
@@ -51,9 +75,15 @@ export async function vigilFetch<T>(path: string, params?: QueryParams): Promise
   let response: Response;
   try {
     response = await fetch(url, {
-      headers: { Authorization: `Bearer ${apiKey}` },
-      // Telemetry data changes continuously; never serve a stale cached
-      // response for a dashboard view.
+      method: init?.method,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        ...(init?.body !== undefined ? { "Content-Type": "application/json" } : {}),
+      },
+      body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
+      // Telemetry/configuration data changes continuously; never serve a
+      // stale cached response for a dashboard view, and never cache a
+      // mutating request.
       cache: "no-store",
     });
   } catch {

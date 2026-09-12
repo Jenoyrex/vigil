@@ -72,4 +72,69 @@ describe("fetchVigilProxy", () => {
     expect(headers?.["Authorization"]).toBeUndefined();
     expect(headers?.["authorization"]).toBeUndefined();
   });
+
+  describe("PUT with a body (e.g. saving an evaluator config)", () => {
+    it("sends the given method and JSON-serialized body", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse(200, { enabled: true }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await fetchVigilProxy("/api/vigil/evaluations/configs/relevance", undefined, {
+        method: "PUT",
+        body: { enabled: true, sampling_rate: 0.5 },
+      });
+
+      const options = fetchMock.mock.calls[0][1] as RequestInit;
+      expect(options.method).toBe("PUT");
+      expect(options.body).toBe(JSON.stringify({ enabled: true, sampling_rate: 0.5 }));
+    });
+
+    it("sets Content-Type: application/json only when a body is present", async () => {
+      const fetchMock = vi.fn().mockResolvedValue(mockResponse(200, {}));
+      vi.stubGlobal("fetch", fetchMock);
+
+      await fetchVigilProxy("/api/vigil/evaluations/configs/relevance", undefined, {
+        method: "PUT",
+        body: { enabled: false },
+      });
+
+      const options = fetchMock.mock.calls[0][1] as RequestInit;
+      const headers = options.headers as Record<string, string>;
+      expect(headers["Content-Type"]).toBe("application/json");
+    });
+
+    it("still returns the parsed JSON response on success", async () => {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(mockResponse(200, { enabled: true, sampling_rate: 0.5 })));
+
+      const result = await fetchVigilProxy("/api/vigil/evaluations/configs/relevance", undefined, {
+        method: "PUT",
+        body: { enabled: true, sampling_rate: 0.5 },
+      });
+
+      expect(result).toEqual({ enabled: true, sampling_rate: 0.5 });
+    });
+
+    it("throws VigilApiError with the upstream detail on a validation failure", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(mockResponse(422, { detail: "sampling_rate must be between 0 and 1." }, false)),
+      );
+
+      await expect(
+        fetchVigilProxy("/api/vigil/evaluations/configs/relevance", undefined, {
+          method: "PUT",
+          body: { enabled: true, sampling_rate: 5 },
+        }),
+      ).rejects.toMatchObject({ status: 422, message: "sampling_rate must be between 0 and 1." });
+    });
+  });
+
+  it("existing GET call sites are unaffected: no body, no Content-Type, method left to fetch's own default", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(mockResponse(200, {}));
+    vi.stubGlobal("fetch", fetchMock);
+    await fetchVigilProxy("/api/vigil/traces");
+    const options = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(options.method).toBeUndefined();
+    expect(options.body).toBeUndefined();
+    expect((options.headers as Record<string, string> | undefined)?.["Content-Type"]).toBeUndefined();
+  });
 });

@@ -8,6 +8,8 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import type { SpanEvent, SpanOut } from "@/lib/api/types";
 import { formatAbsoluteTime, formatBytes, formatCost, formatDuration, formatNullableCount } from "@/lib/format";
 
+import { SpanEvaluationsPanel } from "./SpanEvaluationsPanel";
+
 /** Even once a section is expanded, cap the rendered text so a pathological
  * near-64KB blob can't freeze the tab -- a manual "show full" toggle
  * reveals the rest on request. */
@@ -88,7 +90,7 @@ function EventsList({ events }: { events: SpanEvent[] }) {
   );
 }
 
-export function SpanDetailPanel({ span }: { span: SpanOut }) {
+export function SpanDetailPanel({ traceId, span }: { traceId: string; span: SpanOut }) {
   return (
     <div className="space-y-4 rounded-lg border border-border p-4">
       <div className="flex items-start justify-between gap-2">
@@ -142,6 +144,14 @@ export function SpanDetailPanel({ span }: { span: SpanOut }) {
             </DetailRow>
           </dl>
         </div>
+      ) : null}
+
+      {/* Only llm-typed spans are ever eligible for evaluation (ADR 005
+          section 3's hard span_type = 'llm' filter) -- gating on span_type
+          here, not on llm_provider presence, avoids an evaluations fetch
+          for a span that can never have one. */}
+      {span.span_type === "llm" ? (
+        <SpanEvaluationsPanel traceId={traceId} spanId={span.span_id} />
       ) : null}
 
       <div className="space-y-2">
