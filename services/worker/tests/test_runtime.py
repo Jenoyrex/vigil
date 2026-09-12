@@ -185,6 +185,7 @@ def _make_runtime(
     reaper_interval_seconds: float = 1000.0,
     stuck_job_threshold_seconds: float = 900.0,
     reaper_batch_size: int = 100,
+    max_orphaned_evaluator_threads: int = 4,
 ) -> WorkerRuntime:
     return WorkerRuntime(
         dispatcher=dispatcher,
@@ -195,6 +196,7 @@ def _make_runtime(
         reaper_interval_seconds=reaper_interval_seconds,
         stuck_job_threshold_seconds=stuck_job_threshold_seconds,
         reaper_batch_size=reaper_batch_size,
+        max_orphaned_evaluator_threads=max_orphaned_evaluator_threads,
     )
 
 
@@ -533,3 +535,86 @@ def test_stop_requested_before_run_still_performs_startup_reap_then_exits() -> N
 
     assert reap_conn.queries  # startup reap still ran
     assert dispatcher.dispatch_calls == []  # loop body never entered
+
+
+# -- 15: bounded-orphan self-restart (Phase 4A) -------------------------------
+
+
+def test_reaching_the_orphan_threshold_requests_stop_and_exits_cleanly() -> None:
+    """Once `outstanding_orphaned_calls()` reaches `max_orphaned_evaluator_
+    threads`, the runtime must call its own `request_stop()` -- the exact
+    same graceful-shutdown path a SIGTERM already triggers -- and `run()`
+    must return promptly, never hang or raise."""
+    startup_reap_conn = _FakeConnection()
+    startup_reap_conn.queue_result(rows=[])
+    claim_conn = _FakeConnection()
+    claim_conn.queue_result(rows=[])  # empty claim tick
+
+    dispatcher = FakeDispatcher()
+    runtime = _make_runtime(
+        dispatcher=dispatcher,
+        connections=[startup_reap_conn, claim_conn],
+        max_orphaned_evaluator_threads=4,
+    )
+
+    with patch("worker.runtime.outstanding_orphaned_calls", return_value=4):
+        runtime.run()  # must return promptly, not hang or raise
+
+    assert runtime._stop_event.is_set() is True
+
+
+def test_below_the_orphan_threshold_does_not_request_stop() -> None:
+    """Calls `_check_orphaned_evaluator_threshold()` directly -- not via
+    `run()` -- and asserts `_stop_event` remains unset. A prior version of
+    this test routed through `run()` with a wrapper that manually called
+    `request_stop()` itself whenever the real check hadn't already done so;
+    that made the test pass identically regardless of whether the real
+    threshold comparison was correct, since the loop would exit after one
+    tick either way. Calling the real method directly, with no wrapper,
+    means this test only passes if the real comparison genuinely leaves
+    `_stop_event` unset below the configured threshold."""
+    runtime = _make_runtime(
+        dispatcher=FakeDispatcher(), connections=[], max_orphaned_evaluator_threads=4
+    )
+
+    with patch("worker.runtime.outstanding_orphaned_calls", return_value=3):
+        runtime._check_orphaned_evaluator_threshold()
+
+    assert runtime._stop_event.is_set() is False
+
+
+def test_orphan_threshold_check_logs_worker_id_count_and_limit(caplog) -> None:
+    """`worker_id` deliberately contains no digits at all -- so the outstanding
+    count (5) and limit (4) substring checks below can only be satisfied by
+    those actual values appearing in the log message, never incidentally by
+    the worker_id itself (a prior version of this test used a worker_id
+    ending in "...1234", whose own trailing "4" alone would have satisfied
+    the "4" in record.message check regardless of whether the real limit
+    value was ever correctly formatted into the message). Also asserts the
+    exact formatted substrings runtime.py's own log line produces, not just
+    bare digit membership."""
+    startup_reap_conn = _FakeConnection()
+    startup_reap_conn.queue_result(rows=[])
+    claim_conn = _FakeConnection()
+    claim_conn.queue_result(rows=[])
+
+    dispatcher = FakeDispatcher()
+    runtime = _make_runtime(
+        dispatcher=dispatcher,
+        connections=[startup_reap_conn, claim_conn],
+        worker_id="worker-alpha:pid-beta:token-gamma",
+        max_orphaned_evaluator_threads=4,
+    )
+
+    with (
+        patch("worker.runtime.outstanding_orphaned_calls", return_value=5),
+        caplog.at_level("ERROR"),
+    ):
+        runtime.run()
+
+    assert any(
+        "worker-alpha:pid-beta:token-gamma" in record.message
+        and "5 hung evaluator call(s) outstanding" in record.message
+        and "(limit 4)" in record.message
+        for record in caplog.records
+    )
