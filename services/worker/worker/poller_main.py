@@ -29,7 +29,15 @@ logging.basicConfig(level=logging.INFO)
 
 
 def main() -> None:
-    registry = EvaluatorRegistry()
+    # `evaluator_init_timeout_seconds` is threaded through for consistency
+    # with `worker/__main__.py`'s identical construction, but is never
+    # actually exercised by this process: `worker.poller.Poller` only ever
+    # calls `registry.registered_keys()` (never `.get()`), so no evaluator
+    # is ever lazily constructed here -- see worker/registry.py's
+    # `registered_keys()` docstring.
+    registry = EvaluatorRegistry(
+        evaluator_init_timeout_seconds=settings.evaluator_init_timeout_seconds
+    )
     eligible_span_repository = EligibleSpanRepository(get_clickhouse_client())
     job_creation_client = HttpJobCreationClient(
         base_url=settings.api_base_url,

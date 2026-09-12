@@ -26,6 +26,7 @@ from datetime import UTC, datetime
 import psycopg
 import pytest
 from app.relevance import EVALUATOR_NAME, EVALUATOR_VERSION, RelevanceEvaluator
+from app.types import EvaluationResult
 
 import worker.config
 from worker.clickhouse.repository import EvaluationResultsRepository
@@ -360,3 +361,125 @@ def test_real_execution_resources_supports_genuinely_concurrent_clickhouse_acces
         t.join()
 
     assert errors == []
+
+
+# -- evaluator call timeout, real Postgres + real ClickHouse (Phase 4A) ------
+
+
+class _HangingEvaluator:
+    """An `Evaluator` test double whose `evaluate()` blocks on a
+    `threading.Event` the test controls -- never a real, unbounded hang."""
+
+    name = "hanging_evaluator"
+    version = "0.1.0"
+
+    def __init__(self, release: threading.Event) -> None:
+        self._release = release
+
+    def evaluate(self, evaluator_input, *, threshold=None) -> EvaluationResult:
+        self._release.wait(timeout=10.0)
+        return EvaluationResult(
+            evaluator_name=self.name,
+            evaluator_version=self.version,
+            score=0.9,
+            label="relevant",
+            explanation="fake",
+            evaluation_latency_ms=1.0,
+            evaluation_cost_usd=None,
+            evaluator_model="fake-model",
+            evaluator_provider=None,
+        )
+
+
+def test_evaluator_timeout_marks_the_real_job_failed_with_backoff_and_no_result(
+    real_pg_connection, real_clickhouse_client, real_execution_resources_against_test_db
+) -> None:
+    """The end-to-end proof this item exists for: a hung `evaluate()` call,
+    dispatched against real PostgreSQL and real ClickHouse, must leave the
+    job `failed` (not `dead_letter` -- retries remain), with a populated
+    `last_error` and a `next_attempt_at` matching the existing backoff
+    formula, and must never write a ClickHouse evaluation_results row."""
+    project_id = _insert_project(real_pg_connection)
+    trace_id = uuid.uuid4().hex
+    span_id = uuid.uuid4().hex[:16]
+
+    release = threading.Event()
+    hanging_evaluator = _HangingEvaluator(release)
+
+    job_id = uuid.uuid4()
+    real_pg_connection.execute(
+        """
+        INSERT INTO evaluation_jobs
+            (id, project_id, trace_id, span_id, evaluator_name, evaluator_version)
+        VALUES
+            (%(id)s, %(project_id)s, %(trace_id)s, %(span_id)s, %(evaluator_name)s,
+             %(evaluator_version)s)
+        """,
+        {
+            "id": job_id,
+            "project_id": project_id,
+            "trace_id": trace_id,
+            "span_id": span_id,
+            "evaluator_name": hanging_evaluator.name,
+            "evaluator_version": hanging_evaluator.version,
+        },
+    )
+    _insert_span(
+        real_clickhouse_client,
+        project_id=project_id,
+        trace_id=trace_id,
+        span_id=span_id,
+        input_text="What is the capital of France?",
+        output_text="The capital of France is Paris.",
+    )
+
+    jobs_repository = EvaluationJobsRepository(real_pg_connection)
+    claimed = jobs_repository.claim_jobs(
+        worker_id="dispatcher-timeout-integration-test", batch_size=10
+    )
+    assert len(claimed) == 1
+
+    dispatcher = Dispatcher(
+        max_concurrent_evaluations=1,
+        registry=EvaluatorRegistry(evaluators=[hanging_evaluator]),
+        resource_provider=real_execution_resources_against_test_db,
+        evaluator_call_timeout_seconds=0.05,
+    )
+
+    try:
+        before = datetime.now(UTC)
+        outcomes = dispatcher.dispatch(claimed)
+        after = datetime.now(UTC)
+    finally:
+        release.set()  # let the orphaned evaluate() call finish
+
+    assert len(outcomes) == 1
+    assert not outcomes[0].succeeded
+    assert outcomes[0].failure_handling is not None
+    assert outcomes[0].failure_handling.new_status == "failed"  # attempt 1 < max_retries 3
+
+    row = real_pg_connection.execute(
+        "SELECT status, last_error, next_attempt_at, attempt_count FROM evaluation_jobs "
+        "WHERE id = %(id)s",
+        {"id": job_id},
+    ).fetchone()
+    status, last_error, next_attempt_at, attempt_count = row
+    assert status == "failed"
+    assert last_error is not None and "did not complete within 0.05s" in last_error
+    assert attempt_count == 1
+
+    # Backoff formula (worker/failure_handling.py): retry_base_seconds *
+    # 2**(attempt_count - 1) = 5.0 * 2**0 = 5.0s (defaults), plus jitter in
+    # [0, retry_jitter_seconds=2.0) -- so next_attempt_at must land within
+    # [now + 5.0s, now + 7.0s], generously bounded on both sides for
+    # real-clock/test-timing slack.
+    assert next_attempt_at is not None
+    if next_attempt_at.tzinfo is None:
+        next_attempt_at = next_attempt_at.replace(tzinfo=UTC)
+    delay = (next_attempt_at - before).total_seconds()
+    assert 4.5 <= delay <= (after - before).total_seconds() + 7.5
+
+    result = EvaluationResultsRepository(real_clickhouse_client).get_by_evaluation_id(
+        project_id=project_id, evaluation_id=job_id
+    )
+    assert result is None

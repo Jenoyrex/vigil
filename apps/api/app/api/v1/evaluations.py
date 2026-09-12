@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import AuthenticatedKey, get_current_api_key, get_internal_service_auth
@@ -35,6 +35,7 @@ from app.schemas.evaluations import (
     EvaluatorConfigListResponse,
     EvaluatorConfigOut,
     EvaluatorConfigUpsertRequest,
+    EvaluatorName,
     SpanEvaluationsResponse,
 )
 from app.schemas.query import SpanId, TraceId
@@ -159,7 +160,7 @@ def list_evaluator_configs_endpoint(
     },
 )
 def get_evaluator_config_endpoint(
-    evaluator_name: str = Path(min_length=1),
+    evaluator_name: EvaluatorName,
     auth: AuthenticatedKey = Depends(get_current_api_key),
     db: Session = Depends(get_db),
 ) -> EvaluatorConfigOut:
@@ -201,7 +202,7 @@ def get_evaluator_config_endpoint(
 )
 def upsert_evaluator_config_endpoint(
     payload: EvaluatorConfigUpsertRequest,
-    evaluator_name: str = Path(min_length=1),
+    evaluator_name: EvaluatorName,
     auth: AuthenticatedKey = Depends(get_current_api_key),
     db: Session = Depends(get_db),
 ) -> EvaluatorConfigOut:
@@ -240,7 +241,7 @@ def list_evaluation_jobs_endpoint(
     status_filter: EvaluationJobStatus | None = Query(
         default=None, alias="status", description="Exact match on job status."
     ),
-    evaluator_name: str | None = Query(default=None),
+    evaluator_name: EvaluatorName | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = Query(
         default=None, description="Opaque next_cursor from a prior response."

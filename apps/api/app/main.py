@@ -8,6 +8,7 @@ from app.api.v1.evaluations import router as evaluations_router
 from app.api.v1.traces import router as traces_router
 from app.clickhouse.client import get_clickhouse_client
 from app.config import settings
+from app.db.session import ping_database
 from app.middleware import MaxBodySizeMiddleware
 
 logging.basicConfig(level=logging.INFO)
@@ -31,6 +32,7 @@ def health() -> HealthResponse:
 class ReadyResponse(BaseModel):
     status: str
     clickhouse: str
+    postgresql: str
 
 
 @app.get(
@@ -39,9 +41,13 @@ class ReadyResponse(BaseModel):
     responses={503: {"description": "A backing store is unreachable."}},
     summary="Readiness check",
     description=(
-        "Unlike `/health`, this checks ClickHouse connectivity and can "
-        "return 503. Kept separate so `/health` stays a pure liveness check "
-        "that never depends on a backing store being reachable."
+        "Unlike `/health`, this checks both ClickHouse and PostgreSQL "
+        "connectivity and can return 503 if either is unreachable. Kept "
+        "separate so `/health` stays a pure liveness check that never "
+        "depends on a backing store being reachable. ClickHouse is checked "
+        "first, then PostgreSQL -- either failing short-circuits to a 503 "
+        "with a store-specific detail message, never a raw driver "
+        "exception."
     ),
 )
 def ready() -> ReadyResponse:
@@ -49,4 +55,8 @@ def ready() -> ReadyResponse:
         get_clickhouse_client().ping()
     except Exception as exc:
         raise HTTPException(status_code=503, detail="ClickHouse is unreachable.") from exc
-    return ReadyResponse(status="ok", clickhouse="ok")
+    try:
+        ping_database()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="PostgreSQL is unreachable.") from exc
+    return ReadyResponse(status="ok", clickhouse="ok", postgresql="ok")

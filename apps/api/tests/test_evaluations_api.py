@@ -557,6 +557,126 @@ def test_put_config_does_not_affect_another_project(
     assert other_config is None
 
 
+# -- evaluator_name validation (Phase 4A) -------------------------------------
+#
+# `EvaluatorName` (app/schemas/evaluations.py) bounds length (1-128) and
+# character set ([A-Za-z0-9_.-]) on every customer-facing evaluator_name --
+# GET/PUT .../configs/{evaluator_name} and the GET .../jobs?evaluator_name=
+# filter. Deliberately does NOT enumerate specific names: "relevance" and
+# "relevance_embedding" must keep working precisely because nothing here
+# hardcodes them, and an unrecognized-but-well-formed name must still be
+# accepted as valid input (ADR 005 section 2's open-string design).
+
+_VALID_LENGTH_NAME = "e" * 128
+_OVERSIZED_NAME = "e" * 129
+
+
+def test_get_config_128_char_evaluator_name_is_not_a_422(client, active_api_key) -> None:
+    response = client.get(
+        f"/v1/evaluations/configs/{_VALID_LENGTH_NAME}", headers=_auth_headers(active_api_key)
+    )
+    # Well-formed but never configured -- 404, not 422: validation must
+    # accept this input and let the existing "never configured" semantics
+    # decide the outcome.
+    assert response.status_code == 404
+
+
+def test_get_config_oversized_evaluator_name_is_422(client, active_api_key) -> None:
+    response = client.get(
+        f"/v1/evaluations/configs/{_OVERSIZED_NAME}", headers=_auth_headers(active_api_key)
+    )
+    assert response.status_code == 422
+
+
+def test_put_config_128_char_evaluator_name_succeeds(client, active_api_key) -> None:
+    response = client.put(
+        f"/v1/evaluations/configs/{_VALID_LENGTH_NAME}",
+        json={"enabled": True},
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 200
+    assert response.json()["evaluator_name"] == _VALID_LENGTH_NAME
+
+
+def test_put_config_oversized_evaluator_name_is_422(client, active_api_key) -> None:
+    response = client.put(
+        f"/v1/evaluations/configs/{_OVERSIZED_NAME}",
+        json={"enabled": True},
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 422
+
+
+def test_put_config_evaluator_name_with_invalid_characters_is_422(client, active_api_key) -> None:
+    # Each of these stays within a single URL path segment (no raw `/`, `?`,
+    # or `#`, which would change how the URL itself parses rather than
+    # exercise the validator) but contains a character outside
+    # [A-Za-z0-9_.-]. `%20` is an explicit, unambiguous percent-encoded
+    # space -- decodes server-side to "has space" regardless of the test
+    # client's own auto-encoding behavior for a literal space.
+    for invalid_path_segment in ("has!bang", "has@at", "has$dollar", "has%20space"):
+        response = client.put(
+            f"/v1/evaluations/configs/{invalid_path_segment}",
+            json={"enabled": True},
+            headers=_auth_headers(active_api_key),
+        )
+        assert response.status_code == 422, f"expected 422 for {invalid_path_segment!r}"
+
+
+def test_list_jobs_filter_oversized_evaluator_name_is_422(client, active_api_key) -> None:
+    response = client.get(
+        f"/v1/evaluations/jobs?evaluator_name={_OVERSIZED_NAME}",
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 422
+
+
+def test_list_jobs_filter_128_char_evaluator_name_is_not_a_422(client, active_api_key) -> None:
+    response = client.get(
+        f"/v1/evaluations/jobs?evaluator_name={_VALID_LENGTH_NAME}",
+        headers=_auth_headers(active_api_key),
+    )
+    assert response.status_code == 200
+    assert response.json() == {"jobs": [], "next_cursor": None}
+
+
+def test_existing_production_evaluator_names_still_validate_relevance(
+    client, active_api_key
+) -> None:
+    """Explicit regression guard: "relevance" must keep working end-to-end
+    through both GET and PUT, exactly as every other test in this file
+    already relies on implicitly."""
+    put_response = client.put(
+        "/v1/evaluations/configs/relevance",
+        json={"enabled": True},
+        headers=_auth_headers(active_api_key),
+    )
+    assert put_response.status_code == 200
+
+    get_response = client.get(
+        "/v1/evaluations/configs/relevance", headers=_auth_headers(active_api_key)
+    )
+    assert get_response.status_code == 200
+    assert get_response.json()["evaluator_name"] == "relevance"
+
+
+def test_existing_production_evaluator_names_still_validate_relevance_embedding(
+    client, active_api_key
+) -> None:
+    put_response = client.put(
+        "/v1/evaluations/configs/relevance_embedding",
+        json={"enabled": True},
+        headers=_auth_headers(active_api_key),
+    )
+    assert put_response.status_code == 200
+
+    get_response = client.get(
+        "/v1/evaluations/configs/relevance_embedding", headers=_auth_headers(active_api_key)
+    )
+    assert get_response.status_code == 200
+    assert get_response.json()["evaluator_name"] == "relevance_embedding"
+
+
 # -- evaluation_jobs status list ----------------------------------------------
 
 
