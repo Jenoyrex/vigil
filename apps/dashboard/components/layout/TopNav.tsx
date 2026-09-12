@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { href: "/", label: "Overview" },
   { href: "/traces", label: "Traces" },
   { href: "/analytics", label: "Analytics" },
+  { href: "/evaluations", label: "Evaluations" },
 ] as const;
 
 export function TopNav() {
