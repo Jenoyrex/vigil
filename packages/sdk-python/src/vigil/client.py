@@ -110,10 +110,15 @@ class Vigil:
                 Once reached, new spans are dropped (with a logged warning)
                 rather than growing the buffer without bound.
             max_retries: Additional delivery attempts after the first, for
-                retryable failures (network errors, timeouts, 5xx/503).
+                retryable failures (network errors, timeouts, 429, 5xx).
             retry_backoff_base: Initial retry delay, in seconds; doubles
-                each subsequent attempt up to `retry_backoff_max`.
-            retry_backoff_max: Cap on the retry delay, in seconds.
+                each subsequent attempt up to `retry_backoff_max`, then has
+                full jitter applied (a random delay between 0 and that
+                computed value). A 429 or 503 response's own `Retry-After`
+                header, when present and valid, is used instead of computed
+                backoff and is never jittered.
+            retry_backoff_max: Cap on the computed retry delay (before
+                jitter), in seconds.
             _transport: Internal/testing hook -- an `httpx.BaseTransport` to
                 use instead of real network I/O (e.g. `httpx.MockTransport`
                 in tests). Not part of the supported public API.
