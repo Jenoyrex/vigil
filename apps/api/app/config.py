@@ -33,6 +33,24 @@ class Settings(BaseSettings):
     default_query_window_hours: int = 24
     max_spans_per_trace_response: int = 2000
 
+    # Per-API-key in-process token-bucket rate limiting (Phase 4C), keyed by
+    # AuthenticatedKey.api_key_id -- see app/api/rate_limit.py. Two tiers:
+    # a stricter one for POST /v1/traces (the highest-volume, highest-cost
+    # write path) and a more generous one shared by every other
+    # authenticated customer endpoint. Capacity is the burst size (tokens
+    # available immediately); refill_per_second is the sustained rate once
+    # the burst is spent. These are a starting point, not load-tested
+    # production numbers -- there is no production traffic history yet to
+    # calibrate against; revisit once there is. max_tracked_api_keys bounds
+    # this process's memory to at most that many concurrently-tracked keys
+    # (least-recently-used eviction beyond that), independent of how many
+    # distinct API keys actually exist.
+    rate_limit_ingestion_capacity: int = 20
+    rate_limit_ingestion_refill_per_second: float = 5.0
+    rate_limit_default_capacity: int = 60
+    rate_limit_default_refill_per_second: float = 20.0
+    rate_limit_max_tracked_api_keys: int = 10_000
+
     # Internal worker-fleet authentication (POST /v1/evaluations/jobs), per
     # docs/decisions/005-evaluation-job-storage-worker.md section 9 / Phase
     # 3H amendment. Deliberately no default -- must be supplied via
