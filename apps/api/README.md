@@ -289,6 +289,38 @@ the top 50 by `total_cost_usd`. `total_cost_usd` is a JSON **string**, not a num
 | `VIGIL_API_DEFAULT_QUERY_WINDOW_HOURS` | `24` | Window used when both bounds are omitted |
 | `VIGIL_API_MAX_SPANS_PER_TRACE_RESPONSE` | `2000` | Cap on spans returned by trace detail |
 
+## Rate limiting
+
+Every authenticated customer endpoint is rate limited per API key (`AuthenticatedKey.api_key_id`,
+never the raw key or `project_id` alone), via a small in-process token bucket
+(`app/api/rate_limit.py`) -- no Redis or external store. Two tiers:
+
+| Tier | Applies to | Default capacity (burst) | Default refill |
+|---|---|---|---|
+| Ingestion | `POST /v1/traces` | `VIGIL_API_RATE_LIMIT_INGESTION_CAPACITY` (20) | `VIGIL_API_RATE_LIMIT_INGESTION_REFILL_PER_SECOND` (5/s) |
+| Default | Every other authenticated endpoint (`GET /v1/traces*`, `GET /v1/analytics/*`, `GET`/`PUT /v1/evaluations/*` except job creation) | `VIGIL_API_RATE_LIMIT_DEFAULT_CAPACITY` (60) | `VIGIL_API_RATE_LIMIT_DEFAULT_REFILL_PER_SECOND` (20/s) |
+
+These are starting-point defaults, not load-tested production numbers -- there is no production
+traffic history yet to calibrate against.
+
+Not rate limited: `/health`, `/ready` (unauthenticated infrastructure endpoints), and
+`POST /v1/evaluations/jobs` (internal, worker-only, authenticated by
+`X-Vigil-Internal-Token` -- a single trusted caller on a fixed polling cadence has no
+customer-abuse threat model to defend against).
+
+Exceeding a limit returns `429` with `Retry-After: <N>` (whole seconds) and a body of
+`{"detail": "Rate limit exceeded. Retry after N seconds."}` -- `packages/sdk-python`'s `Vigil`
+client already retries this exact shape with backoff (see its own README's "Retries" section).
+
+**In-process, not distributed.** Rate-limit state lives in this one `api` process's memory, keyed
+by API key, bounded to at most `VIGIL_API_RATE_LIMIT_MAX_TRACKED_API_KEYS` concurrently-tracked
+keys (least-recently-used evicted beyond that). Today's production topology
+(`infrastructure/docker-compose.prod.yml`) runs exactly one `api` replica, so this is a real,
+correctly-enforced limit -- but if `api` is ever horizontally scaled to multiple replicas, each
+replica enforces its own independent budget (the effective limit becomes roughly
+`configured_limit * replica_count`). Revisiting this design (a shared store) would be necessary at
+that point; not needed today.
+
 ## Run tests
 
 Requires the `vigil_test` database (see Database setup above) with migrations applied. From

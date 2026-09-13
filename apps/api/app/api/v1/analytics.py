@@ -9,7 +9,8 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.api.deps import AuthenticatedKey, get_current_api_key
+from app.api.deps import AuthenticatedKey
+from app.api.rate_limit import require_default_rate_limit
 from app.clickhouse.analytics_repository import AnalyticsRepository
 from app.clickhouse.client import get_clickhouse_client
 from app.clickhouse.query_common import ClickHouseQueryError
@@ -50,6 +51,7 @@ def get_analytics_repository() -> AnalyticsRepository:
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         422: {"description": "Invalid time range or query parameters."},
         503: {"description": "ClickHouse is temporarily unavailable; safe to retry."},
     },
@@ -68,7 +70,7 @@ def span_analytics_endpoint(
     span_type: str | None = Query(default=None),
     group_by: SpanGroupBy | None = Query(default=None),
     bucket: SpanBucket | None = Query(default=None),
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     repository: AnalyticsRepository = Depends(get_analytics_repository),
 ) -> SpanAnalyticsResponse:
     try:
@@ -117,6 +119,7 @@ def span_analytics_endpoint(
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         422: {"description": "Invalid time range or query parameters."},
         503: {"description": "ClickHouse is temporarily unavailable; safe to retry."},
     },
@@ -126,7 +129,7 @@ def llm_usage_analytics_endpoint(
     start_time_to: AwareDatetime | None = Query(default=None),
     environment: str | None = Query(default=None),
     group_by: LlmGroupBy | None = Query(default=None),
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     repository: AnalyticsRepository = Depends(get_analytics_repository),
 ) -> LlmUsageResponse:
     try:

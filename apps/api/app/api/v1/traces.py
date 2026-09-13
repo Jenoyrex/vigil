@@ -2,7 +2,9 @@
 
 Route responsibilities are deliberately layered and kept thin here:
 
-    authentication (app.api.deps)
+    authentication (app.api.deps) -> rate limiting (app.api.rate_limit,
+        Phase 4C -- the stricter ingestion tier for this endpoint
+        specifically, the shared default tier for every other route below)
         -> validation (app.schemas.traces, via FastAPI's request body)
         -> transformation (app.services.ingestion)
         -> repository (app.clickhouse.repository)
@@ -21,7 +23,8 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.api.deps import AuthenticatedKey, get_current_api_key
+from app.api.deps import AuthenticatedKey
+from app.api.rate_limit import require_default_rate_limit, require_ingestion_rate_limit
 from app.clickhouse.client import get_clickhouse_client
 from app.clickhouse.query_common import ClickHouseQueryError
 from app.clickhouse.query_repository import TracesQueryRepository
@@ -79,6 +82,7 @@ def get_traces_query_repository() -> TracesQueryRepository:
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         413: {"description": "Request body exceeds the maximum allowed size."},
         422: {
             "description": (
@@ -91,7 +95,7 @@ def get_traces_query_repository() -> TracesQueryRepository:
 )
 def ingest_traces(
     payload: TracesRequest,
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_ingestion_rate_limit),
     repository: SpansRepository = Depends(get_spans_repository),
 ) -> TracesIngestResponse:
     request_id = str(uuid.uuid4())
@@ -138,6 +142,7 @@ def ingest_traces(
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         422: {"description": "Invalid time range, cursor, or query parameters."},
         503: {"description": "ClickHouse is temporarily unavailable; safe to retry."},
     },
@@ -158,7 +163,7 @@ def list_traces_endpoint(
     cursor: str | None = Query(
         default=None, description="Opaque next_cursor from a prior response."
     ),
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     repository: TracesQueryRepository = Depends(get_traces_query_repository),
 ) -> TraceListResponse:
     try:
@@ -208,6 +213,7 @@ def list_traces_endpoint(
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         404: {"description": "No spans found for this trace_id in the authenticated project."},
         422: {"description": "Malformed trace_id or start_date."},
         503: {"description": "ClickHouse is temporarily unavailable; safe to retry."},
@@ -223,7 +229,7 @@ def get_trace_endpoint(
             "scanning every retained day."
         ),
     ),
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     repository: TracesQueryRepository = Depends(get_traces_query_repository),
 ) -> TraceDetailResponse:
     try:
@@ -263,6 +269,7 @@ def get_trace_endpoint(
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         404: {
             "description": "No span found for this trace_id/span_id in the authenticated project."
         },
@@ -274,7 +281,7 @@ def get_span_endpoint(
     trace_id: TraceId,
     span_id: SpanId,
     start_date: date | None = Query(default=None),
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     repository: TracesQueryRepository = Depends(get_traces_query_repository),
 ) -> SpanOut:
     try:
