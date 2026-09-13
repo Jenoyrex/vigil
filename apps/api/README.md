@@ -321,6 +321,28 @@ replica enforces its own independent budget (the effective limit becomes roughly
 `configured_limit * replica_count`). Revisiting this design (a shared store) would be necessary at
 that point; not needed today.
 
+## CORS
+
+Deny-by-default: `VIGIL_API_CORS_ALLOWED_ORIGINS` is empty by default, so no cross-origin browser
+request ever receives an `Access-Control-Allow-Origin` header. This is a deliberate default, not a
+gap -- this API's only real consumers today are `packages/sdk-python` (a non-browser HTTP client;
+CORS is a browser-only enforcement mechanism and doesn't apply to it at all) and
+`apps/dashboard`'s own server process, which calls this API directly server-to-server
+(`apps/dashboard/lib/api/vigilClient.ts`) and never exposes it to browser JS. There is no current
+consumer CORS needs to accommodate.
+
+If a browser-based consumer is ever introduced, set `VIGIL_API_CORS_ALLOWED_ORIGINS` to a
+comma-separated list of exact origins (e.g.
+`https://app.example.com,https://admin.example.com`). `allow_credentials` is always `false` --
+this API authenticates via `Authorization: Bearer <api-key>`, never cookies, so credentialed CORS
+has no purpose here. Allowed methods/headers are scoped to exactly what this API's routes use
+(`GET`/`POST`/`PUT`, `Authorization`/`Content-Type`), not wildcarded. A literal `*` in
+`VIGIL_API_CORS_ALLOWED_ORIGINS` is rejected at startup (`app.config.Settings.
+cors_allowed_origins_list` raises) -- wildcard CORS is not supported by this API at all, even if
+manually typed into the environment.
+
+See `docs/decisions/007-cors-and-dashboard-security-headers.md` for the full rationale.
+
 ## Run tests
 
 Requires the `vigil_test` database (see Database setup above) with migrations applied. From

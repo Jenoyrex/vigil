@@ -1,6 +1,7 @@
 import logging
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.api.v1.analytics import router as analytics_router
@@ -15,6 +16,25 @@ logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title=settings.app_name)
 app.add_middleware(MaxBodySizeMiddleware, max_body_bytes=settings.max_request_body_bytes)
+# Explicit deny-by-default CORS (Phase 4C) -- see app/config.py's
+# `cors_allowed_origins`/`cors_allowed_origins_list` and docs/decisions/
+# 007-cors-and-dashboard-security-headers.md. `allow_credentials=False`
+# deliberately: this API authenticates via `Authorization: Bearer <key>`,
+# never cookies, so credentialed CORS has no purpose here and combining it
+# with a configured origin list would only add risk for zero benefit.
+# `allow_methods`/`allow_headers` are scoped to exactly what this API's
+# routes actually use, not `["*"]`. Added after MaxBodySizeMiddleware so it
+# becomes the OUTERMOST middleware (Starlette wraps in reverse
+# registration order) -- a cross-origin preflight (OPTIONS) request is
+# answered here first, before it would otherwise reach body-size checks or
+# routing.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_allowed_origins_list,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT"],
+    allow_headers=["Authorization", "Content-Type"],
+)
 app.include_router(traces_router)
 app.include_router(analytics_router)
 app.include_router(evaluations_router)

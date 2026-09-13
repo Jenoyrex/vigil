@@ -51,6 +51,18 @@ class Settings(BaseSettings):
     rate_limit_default_refill_per_second: float = 20.0
     rate_limit_max_tracked_api_keys: int = 10_000
 
+    # Explicit deny-by-default CORS policy (Phase 4C) -- see docs/decisions/
+    # 007-cors-and-dashboard-security-headers.md. Empty by default: this API
+    # has no legitimate browser-based cross-origin consumer today -- the
+    # dashboard is a server-side BFF (apps/dashboard/lib/api/vigilClient.ts),
+    # never calling this API directly from browser JS -- so denying all
+    # cross-origin browser access is the correct default, not a gap to fill
+    # in later. A comma-separated list of exact origins (scheme + host +
+    # port, e.g. "https://app.example.com,https://admin.example.com"); set
+    # only if a future browser-based consumer is introduced. See
+    # `cors_allowed_origins_list` below for parsing/validation.
+    cors_allowed_origins: str = ""
+
     # Internal worker-fleet authentication (POST /v1/evaluations/jobs), per
     # docs/decisions/005-evaluation-job-storage-worker.md section 9 / Phase
     # 3H amendment. Deliberately no default -- must be supplied via
@@ -58,6 +70,27 @@ class Settings(BaseSettings):
     # never baked into source. services/worker's own Settings holds the
     # same value under its own VIGIL_WORKER_ prefix.
     internal_service_token: str
+
+    @property
+    def cors_allowed_origins_list(self) -> list[str]:
+        """Parsed, validated form of `cors_allowed_origins`.
+
+        Raises if `"*"` is present -- wildcard CORS is not supported by
+        this API at all, even if manually typed into the environment; list
+        exact origins instead. Raised here (accessed once, at app-startup
+        middleware configuration in app/main.py) rather than silently
+        tolerated, so a dangerous misconfiguration fails loudly at process
+        start instead of quietly granting every origin cross-origin access.
+        """
+        origins = [
+            origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()
+        ]
+        if "*" in origins:
+            raise ValueError(
+                "VIGIL_API_CORS_ALLOWED_ORIGINS must not contain '*' -- list exact "
+                "origins explicitly. Wildcard CORS is not supported by this API."
+            )
+        return origins
 
 
 settings = Settings()
