@@ -343,6 +343,35 @@ manually typed into the environment.
 
 See `docs/decisions/007-cors-and-dashboard-security-headers.md` for the full rationale.
 
+## Logging
+
+Structured (JSON Lines) logging on stdout -- one JSON object per line, every field a genuine
+top-level key (`timestamp`, `level`, `service`, `logger`, `message`, plus request-scoped fields
+like `request_id`/`project_id` where relevant) rather than text embedded in a message string. See
+`app/logging_config.py`'s module docstring for the full design.
+
+`VIGIL_API_LOG_LEVEL` (default `INFO`) controls the root logger level; one of
+`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` -- anything else fails at startup.
+
+Every HTTP request gets a `request_id` (`app.middleware.RequestIdMiddleware`, always minted
+server-side, never trusted from a client-supplied header), bound for the lifetime of that request
+so every log line emitted anywhere in its call stack carries it automatically, and echoed back as
+an `X-Request-Id` response header. `POST /v1/traces`'s own `request_id` response field is this
+same value.
+
+**Local development sees the identical JSON output production does** -- deliberately not a second,
+prettier console formatter, so there is only one code path to verify. Pipe through `jq` for a
+readable view:
+
+```bash
+uv run uvicorn app.main:app --reload | jq .
+```
+
+**Never logged**: API keys, bearer tokens, the internal service token, database URLs, or raw span
+input/output/attributes. Every call site's `extra={...}` is limited to identifiers (request/
+project/trace/span ids, evaluator name/version, counts, error type names) -- see
+`app/logging_config.py`'s security note.
+
 ## Run tests
 
 Requires the `vigil_test` database (see Database setup above) with migrations applied. From

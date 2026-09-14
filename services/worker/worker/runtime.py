@@ -157,7 +157,11 @@ class WorkerRuntime:
         instruction, which is what actually consumes this.
         """
         self._install_signal_handlers()
-        logger.info("worker runtime starting worker_id=%s", self._worker_id)
+        logger.info(
+            "worker runtime starting worker_id=%s",
+            self._worker_id,
+            extra={"worker_id": self._worker_id},
+        )
         self._heartbeat_callback()
 
         self._reap()
@@ -183,7 +187,11 @@ class WorkerRuntime:
             if not did_work:
                 self._stop_event.wait(self._poll_interval_seconds)
 
-        logger.info("worker runtime stopped worker_id=%s", self._worker_id)
+        logger.info(
+            "worker runtime stopped worker_id=%s",
+            self._worker_id,
+            extra={"worker_id": self._worker_id},
+        )
 
     def _check_orphaned_evaluator_threshold(self) -> None:
         """Self-triggers the exact same graceful shutdown a SIGTERM already
@@ -200,6 +208,11 @@ class WorkerRuntime:
                 self._worker_id,
                 outstanding,
                 self._max_orphaned_evaluator_threads,
+                extra={
+                    "worker_id": self._worker_id,
+                    "outstanding": outstanding,
+                    "limit": self._max_orphaned_evaluator_threads,
+                },
             )
             self.request_stop()
 
@@ -208,7 +221,11 @@ class WorkerRuntime:
         signal.signal(signal.SIGINT, self._handle_signal)
 
     def _handle_signal(self, signum: int, frame: object) -> None:
-        logger.info("worker runtime received signal %s, requesting shutdown", signum)
+        logger.info(
+            "worker runtime received signal %s, requesting shutdown",
+            signum,
+            extra={"worker_id": self._worker_id, "signal": signum},
+        )
         self.request_stop()
 
     def _claim_and_dispatch(self) -> bool:
@@ -228,14 +245,16 @@ class WorkerRuntime:
             finally:
                 connection.close()
         except Exception:
-            logger.exception("claim tick failed; treating as idle")
+            logger.exception(
+                "claim tick failed; treating as idle", extra={"worker_id": self._worker_id}
+            )
             return False
 
         if not claimed:
             return False
 
         outcomes = self._dispatcher.dispatch(claimed)
-        _log_dispatch_outcomes(claimed, outcomes)
+        _log_dispatch_outcomes(self._worker_id, claimed, outcomes)
         return True
 
     def _reap(self) -> None:
@@ -254,24 +273,38 @@ class WorkerRuntime:
             finally:
                 connection.close()
         except Exception:
-            logger.exception("reap tick failed")
+            logger.exception("reap tick failed", extra={"worker_id": self._worker_id})
             return
 
-        _log_reap_outcomes(outcomes)
+        _log_reap_outcomes(self._worker_id, outcomes)
 
 
-def _log_dispatch_outcomes(claimed: list[ClaimedJob], outcomes: list[DispatchOutcome]) -> None:
+def _log_dispatch_outcomes(
+    worker_id: str, claimed: list[ClaimedJob], outcomes: list[DispatchOutcome]
+) -> None:
     """One aggregated line per non-empty dispatch tick -- counts, not one
     line per job, so a busy worker's log doesn't scale linearly with job
-    volume."""
+    volume. Job-level detail (job_id, project_id, evaluator) for any
+    individual failure is logged separately, at the point it happened --
+    see worker.dispatcher.Dispatcher._handle_failure."""
     statuses = Counter(
         "succeeded" if outcome.succeeded else type(outcome.error).__name__ for outcome in outcomes
     )
-    logger.info("dispatch tick: claimed=%d outcomes=%s", len(claimed), dict(statuses))
+    logger.info(
+        "dispatch tick: claimed=%d outcomes=%s",
+        len(claimed),
+        dict(statuses),
+        extra={"worker_id": worker_id, "claimed": len(claimed), "outcomes": dict(statuses)},
+    )
 
 
-def _log_reap_outcomes(outcomes: list[ReapedJobOutcome]) -> None:
+def _log_reap_outcomes(worker_id: str, outcomes: list[ReapedJobOutcome]) -> None:
     if not outcomes:
         return
     statuses = Counter(outcome.new_status if outcome.recorded else "stale" for outcome in outcomes)
-    logger.info("reap tick: reclaimed=%d outcomes=%s", len(outcomes), dict(statuses))
+    logger.info(
+        "reap tick: reclaimed=%d outcomes=%s",
+        len(outcomes),
+        dict(statuses),
+        extra={"worker_id": worker_id, "reclaimed": len(outcomes), "outcomes": dict(statuses)},
+    )

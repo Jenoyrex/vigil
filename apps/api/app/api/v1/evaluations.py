@@ -102,13 +102,33 @@ def create_job(
             evaluator_version=payload.evaluator_version,
         )
     except ClickHouseUnavailableError as exc:
-        logger.error("clickhouse unavailable during evaluation job creation: %s", exc)
+        logger.error(
+            "ClickHouse unavailable during evaluation job creation",
+            extra={
+                "project_id": str(payload.project_id),
+                "trace_id": payload.trace_id,
+                "span_id": payload.span_id,
+                "evaluator_name": payload.evaluator_name,
+                "evaluator_version": payload.evaluator_version,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage is temporarily unavailable. Please retry.",
         ) from exc
     except ClickHouseQueryError as exc:
-        logger.error("clickhouse rejected query during evaluation job creation: %s", exc)
+        logger.error(
+            "ClickHouse rejected query during evaluation job creation",
+            extra={
+                "project_id": str(payload.project_id),
+                "trace_id": payload.trace_id,
+                "span_id": payload.span_id,
+                "evaluator_name": payload.evaluator_name,
+                "evaluator_version": payload.evaluator_version,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to verify span.",
@@ -313,13 +333,29 @@ def list_span_evaluations_endpoint(
             repository, project_id=auth.project_id, trace_id=trace_id, span_id=span_id
         )
     except ClickHouseUnavailableError as exc:
-        logger.error("clickhouse unavailable during span evaluations lookup: %s", exc)
+        logger.error(
+            "ClickHouse unavailable during span evaluations lookup",
+            extra={
+                "project_id": str(auth.project_id),
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage is temporarily unavailable. Please retry.",
         ) from exc
     except ClickHouseQueryError as exc:
-        logger.error("clickhouse query failed during span evaluations lookup: %s", exc)
+        logger.error(
+            "ClickHouse query failed during span evaluations lookup",
+            extra={
+                "project_id": str(auth.project_id),
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to query evaluation results.",

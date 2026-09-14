@@ -16,16 +16,19 @@ delegates to this one's `main()`).
 
 from __future__ import annotations
 
-import logging
-
 from worker.clickhouse.client import get_clickhouse_client
 from worker.clickhouse.eligible_span_repository import EligibleSpanRepository
 from worker.config import settings
+from worker.logging_config import configure_logging
 from worker.poller import HttpJobCreationClient, Poller
 from worker.postgres.client import get_connection
 from worker.registry import EvaluatorRegistry
 
-logging.basicConfig(level=logging.INFO)
+# Structured (JSON Lines) logging (Phase 4D, F4) -- see
+# worker/logging_config.py's module docstring. `service="poller"`
+# (distinct from worker/__main__.py's "worker") so a JSON log consumer can
+# tell the two processes apart even though they share one image/package.
+configure_logging(service="poller", level=settings.log_level)
 
 
 def main() -> None:

@@ -196,5 +196,11 @@ class Dispatcher:
                 "Failed to record failure handling for job %s (original error already "
                 "captured on DispatchOutcome.error)",
                 job.id,
+                extra={
+                    "job_id": str(job.id),
+                    "project_id": str(job.project_id),
+                    "evaluator_name": job.evaluator_name,
+                    "evaluator_version": job.evaluator_version,
+                },
             )
             return None

@@ -8,16 +8,18 @@ No orchestration logic lives here; see `worker/runtime.py` for that.
 
 from __future__ import annotations
 
-import logging
-
 from worker.config import settings
 from worker.dispatcher import Dispatcher
+from worker.logging_config import configure_logging
 from worker.postgres.client import get_connection
 from worker.registry import EvaluatorRegistry
 from worker.resources import real_execution_resources
 from worker.runtime import WorkerRuntime, generate_worker_id
 
-logging.basicConfig(level=logging.INFO)
+# Structured (JSON Lines) logging (Phase 4D, F4) -- see
+# worker/logging_config.py's module docstring. Replaces the previous
+# logging.basicConfig(level=logging.INFO) plain-text setup.
+configure_logging(service="worker", level=settings.log_level)
 
 
 def main() -> None:
