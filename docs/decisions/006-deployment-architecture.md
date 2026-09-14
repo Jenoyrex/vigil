@@ -143,10 +143,12 @@ later phases.
    dependency on `api` -- it talks only to the datastores directly (`postgres`, `clickhouse`) and
    never calls `api` at all, so gating it on `api`'s health would add a startup dependency with no
    corresponding runtime one. `dashboard`'s healthcheck is a plain HTTP reachability check against
-   `/`, since Next.js has no equivalent readiness concept of its own. Neither `worker` nor `poller`
-   has a container `HEALTHCHECK` -- neither runs a server, so Docker has no protocol to probe; their
-   liveness is enforced entirely by the restart policy below, an accepted, explicitly-documented
-   limitation (see "Known limitations").
+   `/`, since Next.js has no equivalent readiness concept of its own. `worker` and `poller` have no
+   *HTTP* protocol for Docker to probe (neither runs a server), but as of Phase 4D both do have a
+   container `HEALTHCHECK`, via a heartbeat file rather than an HTTP endpoint -- see "Known
+   limitations" for why an HTTP server was deliberately not added solely to satisfy this, and what
+   the heartbeat approach actually proves. Restart-on-crash is still enforced by the restart policy
+   below regardless of what the healthcheck reports.
 
 10. **`restart: unless-stopped` for `worker` and `poller`.** This is the external process
     supervisor that Phase 4A's `WorkerRuntime` bounded-orphan self-retirement
@@ -209,17 +211,27 @@ introduced; that is CI/CD-adjacent scope explicitly deferred past Phase 4B.
 
 ## Known limitations
 
-- **No I/O timeout on PostgreSQL calls.** `services/worker/worker/execution.py`'s own docstring
-  already documents this as a real, unaddressed gap from Phase 4A (no `connect_timeout` or
-  statement timeout anywhere in `worker/postgres/client.py`): a stuck PostgreSQL call can still
-  block a worker thread indefinitely. Docker's restart policy cannot detect or remedy this --
-  the container still appears to be running a live process. Unchanged by Phase 4B; not
-  addressed here, since general I/O timeout auditing is outside this phase's evaluator/deployment
-  scope.
-- **No HTTP healthcheck for `worker`/`poller`.** Neither runs a server, so Docker's
-  `healthy`/`unhealthy` status can only ever reflect "process is running," never genuine
-  liveness. A worker stuck in a way that never triggers Phase 4A's bounded-orphan self-retirement
-  (e.g., the PostgreSQL gap above) will show as indefinitely healthy to Docker.
+- **~~No I/O timeout on PostgreSQL calls~~ -- resolved, Phase 4D.** `services/worker/worker
+  /postgres/client.py`'s `get_connection()` now sets both libpq's `connect_timeout` and
+  PostgreSQL's own server-side `statement_timeout` from the new `database_timeout_seconds`
+  setting (mirroring `worker/clickhouse/client.py`'s pre-existing `connect_timeout`/
+  `send_receive_timeout` pattern) -- a stuck PostgreSQL call can no longer block a worker thread
+  indefinitely. One residual, explicitly accepted gap remains: a network partition occurring
+  *after* a connection is established, where the server's own cancellation response never
+  arrives, could in principle still exceed this bound -- see that module's own docstring.
+- **~~No HTTP healthcheck for `worker`/`poller`~~ -- resolved differently, Phase 4D.** Rather than
+  adding an HTTP server to either process solely to satisfy a healthcheck (new exposed network
+  surface for zero other benefit), both `worker/runtime.py`'s `WorkerRuntime.run` and
+  `worker/poller.py`'s `Poller.run` now touch a heartbeat file (`worker/heartbeat.py`) once per
+  completed loop iteration, and this image's `HEALTHCHECK` instruction checks that file's
+  freshness instead. Because every I/O call inside one iteration is now individually time-bounded
+  (the PostgreSQL fix above, `clickhouse_timeout_seconds`, and Phase 4A's evaluator-call/
+  evaluator-construction timeouts), a heartbeat that stops refreshing for longer than a generous,
+  configurable bound (`heartbeat_stale_seconds`, default 180s) is a genuine "this loop is stuck,
+  not just busy" signal, not merely "the process exists." A worker stuck in a way that never
+  triggers the bounded-orphan self-retirement Phase 4A already added (a scenario meaningfully
+  narrowed by this phase's own PostgreSQL fix) will now be caught by this healthcheck instead of
+  appearing indefinitely healthy to Docker.
 - **No org/project/API-key provisioning endpoint.** `apps/api/scripts/seed_local_api_key.py`
   remains the only mechanism to mint a `VIGIL_API_KEY` for the dashboard; there is no HTTP-based
   equivalent. In production this script must be run manually against the production database.

@@ -73,6 +73,7 @@ from uuid import UUID
 import psycopg
 
 from worker.clickhouse.eligible_span_repository import EligibleSpan, EligibleSpanRepository
+from worker.heartbeat import touch_heartbeat
 from worker.postgres.poller_checkpoint_repository import PollerCheckpointRepository
 from worker.registry import EvaluatorRegistry
 
@@ -226,6 +227,7 @@ class Poller:
         poller_overlap_seconds: float,
         poller_start_time_lookback_days: int,
         poller_interval_seconds: float,
+        heartbeat_callback: Callable[[], None] = touch_heartbeat,
     ) -> None:
         self._eligible_span_repository = eligible_span_repository
         self._checkpoint_connection_factory = checkpoint_connection_factory
@@ -235,6 +237,7 @@ class Poller:
         self._poller_overlap_seconds = poller_overlap_seconds
         self._poller_start_time_lookback_days = poller_start_time_lookback_days
         self._poller_interval_seconds = poller_interval_seconds
+        self._heartbeat_callback = heartbeat_callback
         self._stop_event = threading.Event()
 
     def request_stop(self) -> None:
@@ -249,10 +252,26 @@ class Poller:
         only works from the main thread in Python, the identical
         constraint `worker.runtime.WorkerRuntime.run` documents for the
         identical reason.
+
+        `self._heartbeat_callback()` (Phase 4D, F6 -- `worker.heartbeat
+        .touch_heartbeat` by default, the same one `WorkerRuntime.run`
+        uses and the same file `services/worker/Dockerfile`'s single
+        `HEALTHCHECK` instruction checks for both processes) is called
+        once at startup and once at the top of every loop iteration --
+        never inside `run_one_tick()` itself, so its own cost is never
+        what a shutdown check waits behind. `run_one_tick()`'s own
+        ClickHouse scan, PostgreSQL checkpoint read/write
+        (`database_timeout_seconds`), and HTTP call to apps/api
+        (`poller_job_creation_timeout_seconds`) are all already
+        individually time-bounded, so a heartbeat that stops refreshing
+        for longer than a generous multiple of those bounds is a genuine
+        stuck-loop signal.
         """
         self._install_signal_handlers()
         logger.info("evaluation job poller starting")
+        self._heartbeat_callback()
         while not self._stop_event.is_set():
+            self._heartbeat_callback()
             self.run_one_tick()
             if self._stop_event.is_set():
                 break
