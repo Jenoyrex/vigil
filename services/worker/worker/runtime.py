@@ -61,6 +61,7 @@ from collections.abc import Callable
 import psycopg
 
 from worker.dispatcher import Dispatcher, DispatchOutcome
+from worker.heartbeat import touch_heartbeat
 from worker.postgres.repository import ClaimedJob, EvaluationJobsRepository
 from worker.reaper import ReapedJobOutcome, reap_stuck_jobs
 from worker.timeouts import outstanding_orphaned_calls
@@ -104,6 +105,7 @@ class WorkerRuntime:
         stuck_job_threshold_seconds: float,
         reaper_batch_size: int,
         max_orphaned_evaluator_threads: int = 4,
+        heartbeat_callback: Callable[[], None] = touch_heartbeat,
     ) -> None:
         self._dispatcher = dispatcher
         self._jobs_connection_factory = jobs_connection_factory
@@ -114,6 +116,7 @@ class WorkerRuntime:
         self._stuck_job_threshold_seconds = stuck_job_threshold_seconds
         self._reaper_batch_size = reaper_batch_size
         self._max_orphaned_evaluator_threads = max_orphaned_evaluator_threads
+        self._heartbeat_callback = heartbeat_callback
         self._stop_event = threading.Event()
 
     def request_stop(self) -> None:
@@ -138,14 +141,31 @@ class WorkerRuntime:
         when nothing was claimed. `self._stop_event` is checked between
         every phase so a shutdown request -- external or self-triggered --
         never triggers one more unit of unnecessary work.
+
+        `self._heartbeat_callback()` (Phase 4D, F6 -- `worker.heartbeat
+        .touch_heartbeat` by default) is called once immediately at
+        startup and once at the top of every loop iteration thereafter --
+        never inside a phase itself, so its own cost can never be what
+        blocks a shutdown check. Every phase called between one heartbeat
+        and the next is now individually time-bounded (PostgreSQL via
+        `database_timeout_seconds`, ClickHouse via
+        `clickhouse_timeout_seconds`, one evaluator call via
+        `evaluator_call_timeout_seconds`/`evaluator_init_timeout_seconds`),
+        so a heartbeat that stops refreshing for longer than a generous
+        multiple of those bounds is a genuine "this loop is stuck, not just
+        busy" signal -- see `services/worker/Dockerfile`'s `HEALTHCHECK`
+        instruction, which is what actually consumes this.
         """
         self._install_signal_handlers()
         logger.info("worker runtime starting worker_id=%s", self._worker_id)
+        self._heartbeat_callback()
 
         self._reap()
         last_reap_at = time.monotonic()
 
         while not self._stop_event.is_set():
+            self._heartbeat_callback()
+
             did_work = self._claim_and_dispatch()
             if self._stop_event.is_set():
                 break

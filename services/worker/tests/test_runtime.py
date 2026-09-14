@@ -186,7 +186,11 @@ def _make_runtime(
     stuck_job_threshold_seconds: float = 900.0,
     reaper_batch_size: int = 100,
     max_orphaned_evaluator_threads: int = 4,
+    heartbeat_callback: Callable[[], None] | None = None,
 ) -> WorkerRuntime:
+    kwargs = {}
+    if heartbeat_callback is not None:
+        kwargs["heartbeat_callback"] = heartbeat_callback
     return WorkerRuntime(
         dispatcher=dispatcher,
         jobs_connection_factory=_connection_factory(connections),
@@ -197,6 +201,7 @@ def _make_runtime(
         stuck_job_threshold_seconds=stuck_job_threshold_seconds,
         reaper_batch_size=reaper_batch_size,
         max_orphaned_evaluator_threads=max_orphaned_evaluator_threads,
+        **kwargs,
     )
 
 
@@ -618,3 +623,77 @@ def test_orphan_threshold_check_logs_worker_id_count_and_limit(caplog) -> None:
         and "(limit 4)" in record.message
         for record in caplog.records
     )
+
+
+# -- F6: liveness heartbeat -----------------------------------------------
+
+
+def test_heartbeat_callback_is_invoked_at_startup_before_first_reap() -> None:
+    """`run()` must call the heartbeat callback once immediately at startup
+    -- before the startup reap, matching the module docstring's "called
+    once immediately at startup" claim -- not only after the first
+    iteration completes."""
+    call_order: list[str] = []
+    reap_conn = _FakeConnection(tag="reap", call_order=call_order)
+    reap_conn.queue_result(rows=[])
+    claim_conn = _FakeConnection(tag="claim", call_order=call_order)
+    claim_conn.queue_result(rows=[])
+
+    runtime = _make_runtime(
+        dispatcher=FakeDispatcher(),
+        connections=[reap_conn, claim_conn],
+        heartbeat_callback=lambda: call_order.append("heartbeat"),
+    )
+    claim_conn.on_execute = runtime.request_stop
+
+    runtime.run()
+
+    # one heartbeat before the startup reap, one more at the top of the
+    # single loop iteration that follows (which then claims and stops)
+    assert call_order == ["heartbeat", "reap", "heartbeat", "claim"]
+
+
+def test_heartbeat_callback_is_invoked_once_per_loop_iteration() -> None:
+    """Three loop iterations (each claiming nothing, so each just idles)
+    must each produce their own heartbeat call -- proving it fires at the
+    top of every iteration, not merely once for the whole run()."""
+    heartbeat_calls = 0
+
+    def _count_heartbeat() -> None:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+
+    reap_conn = _FakeConnection()
+    reap_conn.queue_result(rows=[])
+    claim_conn_1 = _FakeConnection()
+    claim_conn_1.queue_result(rows=[])
+    claim_conn_2 = _FakeConnection()
+    claim_conn_2.queue_result(rows=[])
+    claim_conn_3 = _FakeConnection()
+    claim_conn_3.queue_result(rows=[])
+
+    runtime = _make_runtime(
+        dispatcher=FakeDispatcher(),
+        connections=[reap_conn, claim_conn_1, claim_conn_2, claim_conn_3],
+        poll_interval_seconds=0.01,
+        heartbeat_callback=_count_heartbeat,
+    )
+    claim_conn_3.on_execute = runtime.request_stop
+
+    runtime.run()
+
+    # startup heartbeat + one per iteration (3 claim ticks)
+    assert heartbeat_calls == 1 + 3
+
+
+def test_default_heartbeat_callback_is_touch_heartbeat() -> None:
+    """Without an explicit override, `WorkerRuntime` must default to the
+    real `worker.heartbeat.touch_heartbeat` -- not silently no-op -- so
+    production wiring (worker/__main__.py, which never passes
+    heartbeat_callback explicitly) actually gets a working healthcheck
+    signal."""
+    from worker.heartbeat import touch_heartbeat
+
+    runtime = _make_runtime(dispatcher=FakeDispatcher(), connections=[])
+
+    assert runtime._heartbeat_callback is touch_heartbeat

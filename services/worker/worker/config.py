@@ -36,6 +36,17 @@ class Settings(BaseSettings):
     # local database by default.
     database_url: str = "postgresql://vigil:vigil@localhost:5434/vigil"
 
+    # PostgreSQL I/O bound (Phase 4D, worker/postgres/client.py) -- the same
+    # role clickhouse_timeout_seconds above already plays for ClickHouse,
+    # closing the one-sided gap worker/execution.py's own docstring has
+    # documented since Phase 4A: bounds both connection establishment
+    # (libpq's connect_timeout) and server-side statement execution
+    # (PostgreSQL's own statement_timeout, set via the connection's
+    # `options`), so a stuck claim/reap/completion call can no longer block
+    # a worker thread -- including this process's own main thread inside
+    # `WorkerRuntime.run()` -- indefinitely.
+    database_timeout_seconds: float = 10.0
+
     # Bounded-concurrency dispatch (worker/dispatcher.py). Deliberately
     # small by default, not unbounded -- ADR 005 section 12's "a project
     # operator... should not silently get full-volume evaluation" posture,
@@ -84,6 +95,24 @@ class Settings(BaseSettings):
     # slots to permanently-stuck calls is, in effect, having lost this
     # process's entire intended throughput budget to leaks.
     max_orphaned_evaluator_threads: int = 4
+
+    # Liveness heartbeat staleness bound (Phase 4D, F6, worker/heartbeat.py)
+    # -- read directly from the environment by
+    # services/worker/Dockerfile's HEALTHCHECK command (a separate,
+    # minimal subprocess that does not import this Settings class), not by
+    # any application code path; declared here anyway so it is documented
+    # and validated the same way every other tunable in this file is.
+    # Shared by both `worker` and `poller` (one image, one HEALTHCHECK
+    # instruction -- see that Dockerfile), so it must be generous enough
+    # for whichever of the two has the larger worst-case single-iteration
+    # time: the runtime's worst case is bounded by
+    # evaluator_init_timeout_seconds (90s default, only on a cold-cache
+    # first evaluation) plus database_timeout_seconds; the poller's is
+    # bounded by poller_interval_seconds (30s default) plus its own
+    # ClickHouse/HTTP timeouts. 180s comfortably covers both at their
+    # documented defaults; raise this if either of those settings is
+    # configured materially higher than its default.
+    heartbeat_stale_seconds: float = 180.0
 
     # Retry/backoff (worker/failure_handling.py), per
     # docs/decisions/005-evaluation-job-storage-worker.md's Phase 3E

@@ -145,7 +145,12 @@ def _make_poller(
     registry: EvaluatorRegistry,
     poller_overlap_seconds: float = 60.0,
     poller_start_time_lookback_days: int = 3,
+    poller_interval_seconds: float = 30.0,
+    heartbeat_callback=None,
 ) -> Poller:
+    kwargs = {}
+    if heartbeat_callback is not None:
+        kwargs["heartbeat_callback"] = heartbeat_callback
     return Poller(
         eligible_span_repository=eligible_span_repository,
         checkpoint_connection_factory=_connection_factory(checkpoint_connections),
@@ -154,7 +159,8 @@ def _make_poller(
         poller_batch_size=500,
         poller_overlap_seconds=poller_overlap_seconds,
         poller_start_time_lookback_days=poller_start_time_lookback_days,
-        poller_interval_seconds=30.0,
+        poller_interval_seconds=poller_interval_seconds,
+        **kwargs,
     )
 
 
@@ -591,3 +597,89 @@ def test_install_signal_handlers_wires_sigterm_and_sigint() -> None:
         [call(signal.SIGTERM, poller._handle_signal), call(signal.SIGINT, poller._handle_signal)],
         any_order=True,
     )
+
+
+# -- F6: liveness heartbeat -----------------------------------------------
+
+
+def _checkpoint_connection_with_no_watermark() -> _FakeConnection:
+    """One connection shaped for a single `get_or_create_checkpoint()` call
+    that finds no existing row -- matches `PollerCheckpointRepository`'s own
+    ensure-row-then-read-watermark query pair (see the full-success test
+    above), sufficient for a tick that finds no eligible spans and returns
+    before ever touching job creation or the checkpoint-advance path."""
+    connection = _FakeConnection()
+    connection.queue_result(rowcount=0)  # ensure-row
+    connection.queue_result(rows=[(None,)])  # get watermark -> None
+    return connection
+
+
+def test_heartbeat_callback_is_invoked_at_startup_before_first_tick() -> None:
+    heartbeat_calls: list[str] = []
+    checkpoint_conn = _checkpoint_connection_with_no_watermark()
+
+    def _stop_after_one_tick() -> None:
+        heartbeat_calls.append("heartbeat")
+        if len(heartbeat_calls) == 2:  # startup + first loop iteration
+            poller.request_stop()
+
+    poller = _make_poller(
+        eligible_span_repository=FakeEligibleSpanRepository(spans=[]),
+        checkpoint_connections=[checkpoint_conn],
+        job_creation_client=FakeJobCreationClient(),
+        registry=_registry(),
+        heartbeat_callback=_stop_after_one_tick,
+    )
+
+    with patch("worker.poller.signal.signal"):
+        poller.run()
+
+    assert heartbeat_calls == ["heartbeat", "heartbeat"]
+    assert checkpoint_conn.closed is True
+
+
+def test_heartbeat_callback_is_invoked_once_per_loop_iteration() -> None:
+    """Three loop iterations (each finding no eligible spans, so each just
+    idles) must each produce their own heartbeat call -- proving it fires
+    at the top of every iteration, not merely once for the whole run()."""
+    heartbeat_calls = 0
+    connections = [_checkpoint_connection_with_no_watermark() for _ in range(3)]
+
+    def _count_heartbeat() -> None:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+        if heartbeat_calls == 4:  # startup + 3 loop iterations
+            poller.request_stop()
+
+    poller = _make_poller(
+        eligible_span_repository=FakeEligibleSpanRepository(spans=[]),
+        checkpoint_connections=connections,
+        job_creation_client=FakeJobCreationClient(),
+        registry=_registry(),
+        poller_interval_seconds=0.01,
+        heartbeat_callback=_count_heartbeat,
+    )
+
+    with patch("worker.poller.signal.signal"):
+        poller.run()
+
+    assert heartbeat_calls == 4
+    assert all(connection.closed for connection in connections)
+
+
+def test_default_heartbeat_callback_is_touch_heartbeat() -> None:
+    """Without an explicit override, `Poller` must default to the real
+    `worker.heartbeat.touch_heartbeat` -- the same function
+    `WorkerRuntime` defaults to and the same file
+    `services/worker/Dockerfile`'s single `HEALTHCHECK` instruction checks
+    for both processes -- not silently no-op."""
+    from worker.heartbeat import touch_heartbeat
+
+    poller = _make_poller(
+        eligible_span_repository=FakeEligibleSpanRepository(),
+        checkpoint_connections=[],
+        job_creation_client=FakeJobCreationClient(),
+        registry=_registry(),
+    )
+
+    assert poller._heartbeat_callback is touch_heartbeat

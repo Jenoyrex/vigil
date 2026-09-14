@@ -107,26 +107,26 @@ def execute_job(
     `evaluator_call_timeout_seconds` wraps *only* the `evaluator.evaluate(...)`
     call below -- never ClickHouse or PostgreSQL I/O, and the two are not in
     the same position with respect to that. ClickHouse calls (`span_repository
-    .get_span`, `results_repository.insert_results`) genuinely are bounded --
+    .get_span`, `results_repository.insert_results`) are bounded --
     `worker/clickhouse/client.py` configures both `connect_timeout` and
     `send_receive_timeout` (the latter covers query/data-transfer time, not
     only the initial handshake) from `clickhouse_timeout_seconds`. PostgreSQL
     calls (`evaluator_config_repository.get_config`, `jobs_repository
     .mark_succeeded`, and -- one level up, in `worker.dispatcher.Dispatcher
-    ._handle_failure` -- `mark_failed`/`mark_dead_letter`) have **no such
-    bound**: `worker/postgres/client.py`'s `get_connection()` calls
-    `psycopg.connect(settings.database_url, autocommit=True)` with no
-    `connect_timeout` and no statement timeout of any kind. A stuck
-    PostgreSQL call (lock contention, a slow query, a host that stalls
-    instead of refusing the connection) therefore still blocks whichever
-    thread is running `execute_job` -- the outer thread inside `Dispatcher`'s
-    `ThreadPoolExecutor`, not one of `worker.timeouts.run_with_timeout`'s
-    daemon threads -- for as long as it takes, with no timeout anywhere in
-    this codebase to bound it. That is a real, currently-unaddressed gap in
-    this phase's "the worker can always exit cleanly" guarantee, deliberately
-    left out of Phase 4A's scope (which is evaluator-call and evaluator-
-    construction timeouts specifically, not a general I/O timeout audit) --
-    not a claim that it doesn't exist.
+    ._handle_failure` -- `mark_failed`/`mark_dead_letter`) are now bounded
+    the same way (Phase 4D): `worker/postgres/client.py`'s `get_connection()`
+    sets both libpq's `connect_timeout` and PostgreSQL's own server-side
+    `statement_timeout` from `database_timeout_seconds` -- see that module's
+    docstring for exactly what each bounds and the one residual,
+    network-partition-specific edge case neither can fully close. A stuck
+    PostgreSQL call (lock contention, a slow query) can therefore no longer
+    block whichever thread is running `execute_job` -- the outer thread
+    inside `Dispatcher`'s `ThreadPoolExecutor`, not one of `worker.timeouts
+    .run_with_timeout`'s daemon threads -- indefinitely; it now raises within
+    roughly `database_timeout_seconds` instead. This closes the gap this
+    docstring named as real and unaddressed through Phase 4A (which was
+    scoped to evaluator-call and evaluator-construction timeouts only, not a
+    general I/O timeout audit).
 
     A timeout from the evaluate() call raises `worker.timeouts
     .EvaluatorTimeoutError`, which this function does not catch -- it
