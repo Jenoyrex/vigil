@@ -155,6 +155,12 @@ class HttpJobCreationClient:
                 "X-Vigil-Internal-Token": self._token,
             },
         )
+        extra = {
+            "project_id": str(project_id),
+            "span_id": span_id,
+            "evaluator_name": evaluator_name,
+            "evaluator_version": evaluator_version,
+        }
         try:
             with urllib.request.urlopen(request, timeout=self._timeout_seconds) as response:
                 payload = json.loads(response.read())
@@ -167,6 +173,7 @@ class HttpJobCreationClient:
                     span_id,
                     evaluator_name,
                     evaluator_version,
+                    extra=extra,
                 )
             else:
                 logger.error(
@@ -176,6 +183,7 @@ class HttpJobCreationClient:
                     span_id,
                     evaluator_name,
                     evaluator_version,
+                    extra={**extra, "status": exc.code},
                 )
             return JobCreationOutcome(resolved=False)
         except urllib.error.URLError as exc:
@@ -186,6 +194,7 @@ class HttpJobCreationClient:
                 evaluator_name,
                 evaluator_version,
                 exc,
+                extra={**extra, "error": str(exc)},
             )
             return JobCreationOutcome(resolved=False)
 
@@ -199,6 +208,7 @@ class HttpJobCreationClient:
                 span_id,
                 evaluator_name,
                 evaluator_version,
+                extra={**extra, "reason": reason},
             )
             return JobCreationOutcome(resolved=False)
 
@@ -283,7 +293,11 @@ class Poller:
         signal.signal(signal.SIGINT, self._handle_signal)
 
     def _handle_signal(self, signum: int, frame: object) -> None:
-        logger.info("evaluation job poller received signal %s, requesting shutdown", signum)
+        logger.info(
+            "evaluation job poller received signal %s, requesting shutdown",
+            signum,
+            extra={"signal": signum},
+        )
         self.request_stop()
 
     def run_one_tick(self) -> None:
@@ -335,6 +349,7 @@ class Poller:
                 "poller tick had unresolved job-creation calls (scanned=%d); "
                 "checkpoint not advanced",
                 len(batch),
+                extra={"scanned": len(batch)},
             )
             return
 
@@ -355,6 +370,12 @@ class Poller:
                 span.span_id,
                 evaluator_name,
                 evaluator_version,
+                extra={
+                    "project_id": str(span.project_id),
+                    "span_id": span.span_id,
+                    "evaluator_name": evaluator_name,
+                    "evaluator_version": evaluator_version,
+                },
             )
             return JobCreationOutcome(resolved=False)
 

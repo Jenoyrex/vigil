@@ -242,8 +242,26 @@ introduced; that is CI/CD-adjacent scope explicitly deferred past Phase 4B.
   introducing one here would be new infrastructure beyond Phase 4B's approved scope.
 - **No CI/CD, registry, or automated image-publishing pipeline.** Images are built locally by
   `docker compose ... up --build`; pushing to a registry and referencing images by tag is a
-  natural next step but explicitly deferred, along with rate limiting, backup/restore tooling,
-  and structured logging.
+  natural next step but explicitly deferred, along with backup/restore tooling.
+- **~~No structured logging~~ -- resolved, Phase 4D (F4).** `apps/api` and `services/worker` each
+  gained a small, stdlib-only `logging_config.py` (deliberately duplicated, not shared, per ADR 001
+  decision 6 -- these are two independently deployable services) that replaces
+  `logging.basicConfig(level=logging.INFO)` with one JSON object per line on stdout: `timestamp`,
+  `level`, `service` (`"api"` / `"worker"` / `"poller"`), `logger`, `message`, and whatever
+  identifiers a call site's own `extra={...}` supplies (`request_id`, `project_id`, `worker_id`,
+  `job_id`, `evaluator_name`, etc.) as genuine top-level fields, never folded into the message
+  string. `apps/api` additionally binds one `request_id` per HTTP request
+  (`app.middleware.RequestIdMiddleware`) via a contextvar, so every log line anywhere in that
+  request's call stack -- including deep, request-agnostic helpers like
+  `app/clickhouse/query_common.py` -- carries it automatically, with no per-call-site plumbing.
+  `services/worker` does the same with `worker_id` via explicit `extra={...}` at each call site
+  instead of a contextvar, since job execution runs on a plain `ThreadPoolExecutor`
+  (`worker/dispatcher.py`) that does not propagate one into pool worker threads. No new dependency
+  in either service, no remote logging backend, and no OpenTelemetry -- both existing Dockerfiles'
+  `PYTHONUNBUFFERED=1` already made stdout a reliable log sink for Docker's default `json-file`
+  driver; this only changed what gets written to it. `VIGIL_API_LOG_LEVEL`/`VIGIL_WORKER_LOG_LEVEL`
+  (both default `INFO`) control verbosity; an invalid value fails at process start. See
+  `apps/api/README.md` and `services/worker/README.md`'s own "Logging" sections.
 
 ## Consequences
 

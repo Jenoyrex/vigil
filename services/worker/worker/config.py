@@ -13,11 +13,35 @@ docstring for why steady-state `evaluate()` latency and first-use
 model-construction latency must never share one timeout.
 """
 
+import logging
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="VIGIL_WORKER_", env_file=".env")
+
+    # Structured logging (Phase 4D, F4, worker/logging_config.py). Standard
+    # Python logging level name -- validated below so a typo fails loudly at
+    # process start rather than silently falling back to WARNING, which
+    # `logging.Logger.setLevel` would otherwise do for an unrecognized
+    # string. Shared by both `worker` and `poller` (one Settings class, per
+    # this file's own module docstring), each passing its own `service`
+    # name to `configure_logging` separately.
+    log_level: str = "INFO"
+
+    @field_validator("log_level")
+    @classmethod
+    def _validate_log_level(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        valid_levels = logging.getLevelNamesMapping()
+        if normalized not in valid_levels:
+            raise ValueError(
+                f"VIGIL_WORKER_LOG_LEVEL={value!r} is not a valid logging level "
+                f"(expected one of {sorted(valid_levels)})."
+            )
+        return normalized
 
     # ClickHouse connection. Defaults match infrastructure/.env.example /
     # infrastructure/docker-compose.yml local development credentials --

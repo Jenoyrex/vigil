@@ -1,5 +1,3 @@
-import logging
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -10,9 +8,13 @@ from app.api.v1.traces import router as traces_router
 from app.clickhouse.client import get_clickhouse_client
 from app.config import settings
 from app.db.session import ping_database
-from app.middleware import MaxBodySizeMiddleware
+from app.logging_config import configure_logging
+from app.middleware import MaxBodySizeMiddleware, RequestIdMiddleware
 
-logging.basicConfig(level=logging.INFO)
+# Structured (JSON Lines) logging (Phase 4D, F4) -- see
+# app/logging_config.py's module docstring. Replaces the previous
+# logging.basicConfig(level=logging.INFO) plain-text setup.
+configure_logging(service="api", level=settings.log_level)
 
 app = FastAPI(title=settings.app_name)
 app.add_middleware(MaxBodySizeMiddleware, max_body_bytes=settings.max_request_body_bytes)
@@ -23,11 +25,11 @@ app.add_middleware(MaxBodySizeMiddleware, max_body_bytes=settings.max_request_bo
 # never cookies, so credentialed CORS has no purpose here and combining it
 # with a configured origin list would only add risk for zero benefit.
 # `allow_methods`/`allow_headers` are scoped to exactly what this API's
-# routes actually use, not `["*"]`. Added after MaxBodySizeMiddleware so it
-# becomes the OUTERMOST middleware (Starlette wraps in reverse
-# registration order) -- a cross-origin preflight (OPTIONS) request is
-# answered here first, before it would otherwise reach body-size checks or
-# routing.
+# routes actually use, not `["*"]`. Added after MaxBodySizeMiddleware (and,
+# as of Phase 4D, before RequestIdMiddleware -- see that middleware's own
+# docstring for why it is deliberately the outermost layer now) so a
+# cross-origin preflight (OPTIONS) request is still answered before it
+# would otherwise reach body-size checks or routing.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allowed_origins_list,
@@ -35,6 +37,11 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT"],
     allow_headers=["Authorization", "Content-Type"],
 )
+# Registered last (see app/middleware.py's RequestIdMiddleware docstring) so
+# it becomes the OUTERMOST middleware -- every request gets a request_id
+# bound for structured-log correlation, and an X-Request-Id response
+# header, before CORS/body-size handling or routing ever runs.
+app.add_middleware(RequestIdMiddleware)
 app.include_router(traces_router)
 app.include_router(analytics_router)
 app.include_router(evaluations_router)

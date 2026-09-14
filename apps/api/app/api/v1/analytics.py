@@ -92,13 +92,19 @@ def span_analytics_endpoint(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     except ClickHouseUnavailableError as exc:
-        logger.error("clickhouse unavailable during span analytics: %s", exc)
+        logger.error(
+            "ClickHouse unavailable during span analytics",
+            extra={"project_id": str(auth.project_id), "error": str(exc)},
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage is temporarily unavailable. Please retry.",
         ) from exc
     except ClickHouseQueryError as exc:
-        logger.error("clickhouse query failed during span analytics: %s", exc)
+        logger.error(
+            "ClickHouse query failed during span analytics",
+            extra={"project_id": str(auth.project_id), "error": str(exc)},
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to query telemetry."
         ) from exc
@@ -148,13 +154,19 @@ def llm_usage_analytics_endpoint(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     except ClickHouseUnavailableError as exc:
-        logger.error("clickhouse unavailable during llm usage analytics: %s", exc)
+        logger.error(
+            "ClickHouse unavailable during llm usage analytics",
+            extra={"project_id": str(auth.project_id), "error": str(exc)},
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage is temporarily unavailable. Please retry.",
         ) from exc
     except ClickHouseQueryError as exc:
-        logger.error("clickhouse query failed during llm usage analytics: %s", exc)
+        logger.error(
+            "ClickHouse query failed during llm usage analytics",
+            extra={"project_id": str(auth.project_id), "error": str(exc)},
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to query telemetry."
         ) from exc
