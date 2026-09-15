@@ -94,6 +94,34 @@ class Settings(BaseSettings):
     # same value under its own VIGIL_WORKER_ prefix.
     internal_service_token: str
 
+    # Production provisioning/onboarding bootstrap (Phase 4D, F3) -- see
+    # app/api/v1/provisioning.py and docs/decisions/006-deployment-
+    # architecture.md. Empty by default, which `app.api.deps.
+    # get_bootstrap_auth` treats as "bootstrap is disabled": every request
+    # to `POST /v1/provisioning/bootstrap` is rejected with 401, regardless
+    # of any token presented, unless an operator explicitly sets this to a
+    # real, high-entropy secret. Deliberately no non-empty default -- unlike
+    # `internal_service_token` above (which every environment, local dev
+    # included, MUST set or the app refuses to start), bootstrap is meant to
+    # be unreachable by default and only enabled for the brief window an
+    # operator actually needs it, then unset again. Never place a real value
+    # in `.env.example`.
+    bootstrap_secret: str = ""
+
+    # In-process, IP-keyed rate limiting for POST /v1/provisioning/bootstrap
+    # (Phase 4D, F3) -- see app/api/rate_limit.py's RateLimiter (the same
+    # primitive Phase 4C's per-API-key limits use, generalized to any
+    # hashable key). Deliberately much stricter than the customer-key tiers
+    # above: this endpoint is reachable by anyone who can send it a request
+    # at all (no api_keys-table lookup gates it), its only real caller ever
+    # needs to succeed once, and the goal is to slow down brute-forcing
+    # bootstrap_secret, not to serve legitimate sustained traffic. Keyed by
+    # client IP rather than any authenticated identity, since a bootstrap
+    # request has none.
+    bootstrap_rate_limit_capacity: int = 5
+    bootstrap_rate_limit_refill_per_second: float = 0.05
+    bootstrap_rate_limit_max_tracked_ips: int = 10_000
+
     @property
     def cors_allowed_origins_list(self) -> list[str]:
         """Parsed, validated form of `cors_allowed_origins`.

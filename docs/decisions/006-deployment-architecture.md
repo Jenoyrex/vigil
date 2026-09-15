@@ -232,10 +232,26 @@ introduced; that is CI/CD-adjacent scope explicitly deferred past Phase 4B.
   triggers the bounded-orphan self-retirement Phase 4A already added (a scenario meaningfully
   narrowed by this phase's own PostgreSQL fix) will now be caught by this healthcheck instead of
   appearing indefinitely healthy to Docker.
-- **No org/project/API-key provisioning endpoint.** `apps/api/scripts/seed_local_api_key.py`
-  remains the only mechanism to mint a `VIGIL_API_KEY` for the dashboard; there is no HTTP-based
-  equivalent. In production this script must be run manually against the production database.
-  Tracked as a known gap, not solved by this ADR.
+- **~~No org/project/API-key provisioning endpoint~~ -- resolved, Phase 4D (F3).**
+  `POST /v1/provisioning/bootstrap` is now the production, HTTP-based equivalent of
+  `apps/api/scripts/seed_local_api_key.py` -- deliberately bootstrap provisioning for a single
+  trusted operator, not a public signup system (this codebase still has no user-facing
+  authentication of any kind). Protected by a dedicated, environment-configured secret
+  (`VIGIL_API_BOOTSTRAP_SECRET`, empty/disabled by default, compared with
+  `hmac.compare_digest`, structurally identical to `get_internal_service_auth`'s existing
+  internal-worker-token pattern -- a customer `vgl_*` API key can never satisfy it) and an
+  IP-keyed in-process rate limiter (no Redis). Succeeds at most once per deployment, enforced by
+  the database in two layers, not an application-level flag: an `organizations`-non-empty check
+  runs first and alone refuses every repeat call (including one where only the audit/diagnostic
+  marker row described below was deleted -- see the next sentence), and an atomic,
+  conflict-checked insert against a new single-row `provisioning_bootstrap` table (mirroring
+  `evaluation_poller_checkpoint`'s existing fixed-string-primary-key singleton idiom) is what
+  makes a *successful* run safe under concurrent requests specifically. There is deliberately no
+  "delete one row to re-enable bootstrap" path -- re-enabling it requires a full, destructive
+  teardown of the organization/project/API key the original run created, documented as exactly
+  that (operator-level, disposable-environment-only) in `apps/api/README.md`'s "Provisioning"
+  section, which also has the full operator workflow; see `app/services/provisioning.py`'s module
+  docstring for the concurrency/atomicity argument in full.
 - **No TLS termination or reverse proxy.** `docker-compose.prod.yml` exposes `api` and `dashboard`
   as plain HTTP on the host. TLS termination is assumed to be handled by infrastructure the
   operator already has in front of this stack (a load balancer, an existing reverse proxy) --

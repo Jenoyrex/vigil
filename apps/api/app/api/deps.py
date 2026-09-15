@@ -115,3 +115,40 @@ def get_internal_service_auth(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_INTERNAL_TOKEN_DETAIL
         )
+
+
+BOOTSTRAP_TOKEN_HEADER = "X-Vigil-Bootstrap-Token"
+
+_INVALID_BOOTSTRAP_TOKEN_DETAIL = "Invalid or missing bootstrap authorization."
+
+
+def get_bootstrap_auth(
+    x_vigil_bootstrap_token: str | None = Header(default=None, alias=BOOTSTRAP_TOKEN_HEADER),
+) -> None:
+    """Authenticate `POST /v1/provisioning/bootstrap` (Phase 4D, F3) --
+    structurally identical to `get_internal_service_auth` immediately above
+    (a dedicated header, never `Authorization: Bearer`, compared with
+    `hmac.compare_digest` against a dedicated `Settings` field, never
+    touching the `api_keys` table), for the identical reason: this must be
+    a wholly separate trust boundary from customer API-key authentication,
+    not a variant of it. A customer's `vgl_*` key cannot satisfy this check
+    no matter how it's presented.
+
+    **Fails closed when unconfigured.** `settings.bootstrap_secret` is
+    empty by default (see app/config.py) -- checked FIRST, before looking
+    at the presented token at all, so an operator who has not explicitly
+    opted in by setting a real secret gets an unconditional 401 for every
+    request, including one presenting an empty token that would otherwise
+    trivially "match" an empty configured secret. This is what makes
+    bootstrap unreachable by default rather than merely undocumented.
+    """
+    if not settings.bootstrap_secret:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_BOOTSTRAP_TOKEN_DETAIL
+        )
+    if x_vigil_bootstrap_token is None or not hmac.compare_digest(
+        x_vigil_bootstrap_token, settings.bootstrap_secret
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_BOOTSTRAP_TOKEN_DETAIL
+        )

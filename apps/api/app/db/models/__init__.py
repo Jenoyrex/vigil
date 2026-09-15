@@ -5,6 +5,7 @@ from app.db.models.evaluator_config import EvaluatorConfig
 from app.db.models.membership import OrganizationMembership
 from app.db.models.organization import Organization
 from app.db.models.project import Project
+from app.db.models.provisioning_bootstrap import ProvisioningBootstrap
 from app.db.models.user import User
 
 __all__ = [
@@ -15,5 +16,6 @@ __all__ = [
     "Organization",
     "OrganizationMembership",
     "Project",
+    "ProvisioningBootstrap",
     "User",
 ]
