@@ -1,0 +1,387 @@
+name: CD
+
+# Publishes ghcr.io/<owner>/vigil-{api,dashboard,worker} images and, only on
+# an explicit manual dispatch, deploys one immutable tag to production over
+# SSH. See docs/decisions/006-deployment-architecture.md, decision 13, for
+# the full design rationale (including why the CI-gate below exists instead
+# of a fake cross-workflow `needs:`, and the empirically-verified
+# `pull` + `up --no-build` sequence that never silently rebuilds from
+# source).
+#
+# .github/workflows/ci.yml is unchanged and remains validation-only.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: >-
+          Immutable "sha-<40-char-commit-sha>" tag to deploy (see the
+          package's tag list on GHCR for valid values, or the "sha-"
+          revision of any prior successful publish). Leave empty to
+          publish and deploy the commit this workflow is running against.
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Real, per-commit gate on ci.yml's own outcome -- not a fake `needs:`
+  # (impossible across separate workflow files) and not a duplicate test
+  # run. ci.yml triggers on the same `push`, so this polls the Actions API
+  # for *that exact commit SHA*'s ci.yml run and blocks publish on it
+  # actually completing successfully, closing the race where both
+  # workflows start from the same push event. Skipped entirely for a
+  # rollback-only dispatch (image_tag provided): no new commit is being
+  # published, so there is nothing new for CI to have validated.
+  # ---------------------------------------------------------------------
+  ci_gate:
+    name: Wait for CI
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.image_tag == '')
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Wait for ci.yml to pass on ${{ github.sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          attempt=0
+          max_attempts=90   # 90 * 15s = ~22.5 minutes
+          while :; do
+            # event=push (server-side filter): ci.yml also triggers on
+            # pull_request, and a PR-tested commit can reach master with an
+            # unchanged SHA (e.g. a fast-forward or no-op rebase merge), so
+            # head_sha alone can match both a pull_request run and a push
+            # run for the same commit. Without this filter,
+            # `sort_by(.run_started_at) | last` could pick whichever one
+            # happened to start later -- not necessarily the push run that
+            # actually validated this commit in its master/production
+            # context. Restricting to event=push removes that ambiguity.
+            run=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=10" \
+              --jq '[.workflow_runs[]] | sort_by(.run_started_at) | last')
+            status=$(echo "$run" | jq -r '.status // "not_found"')
+            conclusion=$(echo "$run" | jq -r '.conclusion // "null"')
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                echo "ci.yml passed for $SHA"
+                break
+              fi
+              echo "::error::ci.yml for $SHA completed with conclusion '$conclusion'; refusing to publish."
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "::error::Timed out waiting for ci.yml to complete for $SHA."
+              exit 1
+            fi
+            sleep 15
+          done
+
+  # ---------------------------------------------------------------------
+  # Build and push all three images, tagged with the immutable
+  # sha-<40-char-commit> tag (the only tag the deploy job may use),
+  # the sanitized branch name, and -- master only -- `latest`. Same build
+  # contexts as ci.yml's docker-build matrix, unchanged.
+  # ---------------------------------------------------------------------
+  publish:
+    name: Publish (${{ matrix.name }})
+    needs: ci_gate
+    if: needs.ci_gate.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: vigil-api
+            context: apps/api
+            dockerfile: apps/api/Dockerfile
+            build-contexts: ""
+          - name: vigil-dashboard
+            context: apps/dashboard
+            dockerfile: apps/dashboard/Dockerfile
+            build-contexts: "workspace=."
+          - name: vigil-worker
+            context: services/worker
+            dockerfile: services/worker/Dockerfile
+            build-contexts: "evaluator=services/evaluator"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # GHCR requires an all-lowercase image path; github.repository_owner
+      # preserves whatever case the account/org actually has.
+      - name: Lowercase image owner
+        id: owner
+        run: echo "lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/${{ matrix.name }}
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          build-contexts: ${{ matrix.build-contexts }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+  # ---------------------------------------------------------------------
+  # Manual-only. Never runs on a plain push to master. Deploys exactly one
+  # immutable sha-<commit> tag (the one just published, or an operator-
+  # chosen earlier one for rollback -- no rebuild in the rollback case,
+  # since ci_gate/publish are skipped entirely above). Protected by the
+  # "production" GitHub Environment and a non-overlapping concurrency
+  # group.
+  # ---------------------------------------------------------------------
+  deploy:
+    name: Deploy to production
+    needs: [ci_gate, publish]
+    # `needs.*` wildcard traversal doesn't exist in GitHub Actions
+    # expressions, so each job's result is checked explicitly. `always()`
+    # is required here because the default implicit `if` (`success()`)
+    # treats a *skipped* need as failing too -- and ci_gate/publish are
+    # deliberately skipped (not failed) on a rollback-only dispatch.
+    if: |
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      needs.ci_gate.result != 'failure' && needs.ci_gate.result != 'cancelled' &&
+      needs.publish.result != 'failure' && needs.publish.result != 'cancelled'
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      # ---- Resolve + validate the tag before anything else touches the
+      # network or an SSH key. `sha-<40-hex>` is the only shape the rest of
+      # this job will ever act on. The commit to check out below is not a
+      # separate lookup -- `docker/metadata-action`'s `type=sha,format=long`
+      # tag IS `sha-<the commit the image was built from>`, so stripping the
+      # `sha-` prefix recovers it exactly, for both a fresh deploy and a
+      # rollback to an older tag.
+      - name: Resolve and validate image tag
+        id: image
+        env:
+          IMAGE_TAG_INPUT: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          tag="$IMAGE_TAG_INPUT"
+          if [ -z "$tag" ]; then
+            tag="sha-${{ github.sha }}"
+          fi
+          if ! [[ "$tag" =~ ^sha-[0-9a-f]{40}$ ]]; then
+            echo "::error::image_tag must be an immutable 'sha-<40-char-commit-sha>' tag, got: $tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=${tag#sha-}" >> "$GITHUB_OUTPUT"
+
+      # ---- Check out the EXACT commit the image tag names -- never the
+      # branch/HEAD this workflow run happens to be attached to. This is
+      # what makes deployment configuration (below) match the image on both
+      # a normal deploy and a rollback: Commit A's image is always paired
+      # with Commit A's docker-compose.prod.yml, never Commit B's, however
+      # far HEAD has since moved. See
+      # docs/decisions/006-deployment-architecture.md, decision 13.
+      - name: Check out deployed commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.image.outputs.commit }}
+
+      - name: Lowercase image owner
+        id: owner
+        run: echo "lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # ---- Fail closed before any deployment action if the operator has
+      # not configured this GitHub Environment. No production host is
+      # fabricated here -- see docs/decisions/006-deployment-architecture.md,
+      # decision 13, for exactly what "production" Environment secrets to
+      # create.
+      - name: Verify deployment configuration is present
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -z "$DEPLOY_HOST" ] && missing="$missing DEPLOY_HOST"
+          [ -z "$DEPLOY_SSH_USER" ] && missing="$missing DEPLOY_SSH_USER"
+          [ -z "$DEPLOY_SSH_KEY" ] && missing="$missing DEPLOY_SSH_KEY"
+          [ -z "$DEPLOY_SSH_KNOWN_HOSTS" ] && missing="$missing DEPLOY_SSH_KNOWN_HOSTS"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing required 'production' Environment configuration:$missing"
+            exit 1
+          fi
+
+      # ---- SSH host-key verification is mandatory: the known_hosts file
+      # below is the operator-pinned DEPLOY_SSH_KNOWN_HOSTS secret, and
+      # StrictHostKeyChecking stays at its secure default (yes) -- never
+      # disabled. Key material never appears in logs (written straight to a
+      # runner-local file, never echoed; no -x/set -x anywhere in this job).
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh/deploy_key"
+          printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/ssh/deploy_key"
+          {
+            echo "SSH_OPTS=-i $RUNNER_TEMP/ssh/deploy_key -o UserKnownHostsFile=$RUNNER_TEMP/ssh/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes"
+          } >> "$GITHUB_ENV"
+
+      # ---- Sync ONLY the deployment configuration -- the Compose file and
+      # the ClickHouse init scripts -- from the exact commit checked out
+      # above, never the current branch/HEAD. This is what makes a rollback
+      # (image_tag=sha-<A>, while master has since moved to commit B) run
+      # Commit A's image against Commit A's Compose file, not B's -- the
+      # host would otherwise keep running whatever docker-compose.prod.yml a
+      # previous deploy last left at ~/vigil/infrastructure. Every other
+      # file in the repo (application code included) is left untouched by
+      # this transfer; in particular infrastructure/.env.production is never
+      # a source or destination path here -- it stays host-local and
+      # operator-owned (see infrastructure/.env.production.example).
+      #
+      # The remote clickhouse/init directory is removed and recreated first
+      # so a file renamed/removed since the previous deploy can never
+      # survive as a stale leftover, and the follow-up `scp` of each file
+      # individually (no `-r`, no trailing-slash directory copy) is what
+      # keeps the result at exactly .../clickhouse/init/<file> -- never the
+      # nested .../clickhouse/init/init/<file> that `scp -r` of a directory
+      # onto an existing same-named directory produces (verified directly
+      # against this repository's own init/ layout; see
+      # docs/decisions/006-deployment-architecture.md, decision 13).
+      - name: Sync deployment configuration to host
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh $SSH_OPTS "$DEPLOY_SSH_USER@$DEPLOY_HOST" '
+            set -eu
+            mkdir -p ~/vigil/infrastructure
+            rm -rf ~/vigil/infrastructure/clickhouse/init
+            mkdir -p ~/vigil/infrastructure/clickhouse/init
+          '
+          scp $SSH_OPTS \
+            infrastructure/docker-compose.prod.yml \
+            "$DEPLOY_SSH_USER@$DEPLOY_HOST:~/vigil/infrastructure/docker-compose.prod.yml"
+          scp $SSH_OPTS \
+            infrastructure/clickhouse/init/* \
+            "$DEPLOY_SSH_USER@$DEPLOY_HOST:~/vigil/infrastructure/clickhouse/init/"
+
+      # ---- Steps 1-2-3: pull immutable images, then run the migration to
+      # completion and verify its real exit code, without bypassing the
+      # existing Compose dependency graph (postgres's own healthcheck gates
+      # `migrate` exactly as it does locally -- see
+      # infrastructure/docker-compose.prod.yml). `docker compose pull`
+      # never builds; it hard-fails if any tag is unavailable, so a bad
+      # image_tag is caught here, before any container is touched.
+      - name: Pull images and run migration
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          TAG: ${{ steps.image.outputs.tag }}
+          OWNER: ${{ steps.owner.outputs.lc }}
+        run: |
+          set -euo pipefail
+          # The three VIGIL_*_IMAGE assignments are expanded locally (they
+          # are plain, regex-validated registry references, not secrets)
+          # and passed as an env-var prefix to the remote `bash -s`
+          # invocation. The heredoc delimiter is quoted ('REMOTE'), so its
+          # body is sent to the remote shell completely unexpanded --
+          # $COMPOSE etc. below are resolved by the REMOTE bash, not this
+          # one, with no fragile local quote-splicing.
+          ssh $SSH_OPTS "$DEPLOY_SSH_USER@$DEPLOY_HOST" \
+            "VIGIL_API_IMAGE=$REGISTRY/$OWNER/vigil-api:$TAG VIGIL_DASHBOARD_IMAGE=$REGISTRY/$OWNER/vigil-dashboard:$TAG VIGIL_WORKER_IMAGE=$REGISTRY/$OWNER/vigil-worker:$TAG bash -s" <<'REMOTE'
+          set -eu
+          cd ~/vigil
+          COMPOSE="docker compose -f infrastructure/docker-compose.prod.yml --env-file infrastructure/.env.production"
+          $COMPOSE pull migrate api dashboard worker poller
+          $COMPOSE up --no-build --exit-code-from migrate migrate
+          REMOTE
+
+      # ---- Step 4: start/update the long-running application services.
+      # `--no-build` is kept as defense-in-depth even though `pull` above
+      # already guarantees the images are present -- see
+      # infrastructure/docker-compose.prod.yml's own header comment for why
+      # this flag, specifically, is what makes the fallback-to-build
+      # footgun impossible rather than just unlikely.
+      - name: Start application services
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          TAG: ${{ steps.image.outputs.tag }}
+          OWNER: ${{ steps.owner.outputs.lc }}
+        run: |
+          set -euo pipefail
+          ssh $SSH_OPTS "$DEPLOY_SSH_USER@$DEPLOY_HOST" \
+            "VIGIL_API_IMAGE=$REGISTRY/$OWNER/vigil-api:$TAG VIGIL_DASHBOARD_IMAGE=$REGISTRY/$OWNER/vigil-dashboard:$TAG VIGIL_WORKER_IMAGE=$REGISTRY/$OWNER/vigil-worker:$TAG bash -s" <<'REMOTE'
+          set -eu
+          cd ~/vigil
+          docker compose -f infrastructure/docker-compose.prod.yml --env-file infrastructure/.env.production \
+            up -d --no-build api dashboard worker poller
+          REMOTE
+
+      # ---- Step 5: bounded, retried health verification against the real
+      # endpoints, from the host itself (127.0.0.1) rather than assuming
+      # DEPLOY_HOST is reachable from the public internet -- this repo
+      # fabricates no assumption about the host's network exposure. A
+      # failed check fails this job, and therefore the deployment.
+      - name: Health-check deployment
+        run: |
+          set -euo pipefail
+          ssh $SSH_OPTS "$DEPLOY_SSH_USER@$DEPLOY_HOST" '
+            set -eu
+            check() {
+              url="$1"
+              for i in $(seq 1 30); do
+                if curl -sS --fail --max-time 5 "$url" > /dev/null; then
+                  echo "$url is healthy"
+                  return 0
+                fi
+                sleep 5
+              done
+              echo "$url did not become healthy in time" >&2
+              return 1
+            }
+            check "http://127.0.0.1:8000/ready"
+            check "http://127.0.0.1:3000/"
+          '
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
