@@ -199,15 +199,184 @@ later phases.
     writable, and `EmbeddingRelevanceEvaluator` successfully downloads the model and produces a
     result with no permission errors.
 
+13. **CI/CD publish and manual protected deploy (Phase 4D, F7).** `.github/workflows/cd.yml` is new;
+    `.github/workflows/ci.yml` is unchanged and remains validation-only -- the two are independent
+    workflows, not chained.
+
+    - **Registry: GHCR, `GITHUB_TOKEN`, no long-lived PAT.** `ghcr.io/<owner>/vigil-{api,dashboard,
+      worker}` (the worker image still serves both `worker` and `poller`, per decision 2, unchanged).
+      `docker/login-action@v3` authenticates the publish job with the workflow's own `GITHUB_TOKEN`
+      (`packages: write`), which is sufficient for pushing -- no registry PAT is stored anywhere.
+      **GHCR packages created from a workflow's `GITHUB_TOKEN` default to private regardless of the
+      repository's own visibility.** Since this repository is public and GHCR is the default
+      registry choice here, an operator must, after the first successful publish of each of the
+      three packages, open that package's own Settings (github.com -> the package's page, not the
+      repository's) and change visibility to Public -- otherwise `docker compose pull` on the
+      deploy host (which has no registry credentials of its own; see below) will get `denied`
+      rather than the image.
+    - **Tags: `docker/metadata-action@v5`, not hand-rolled.** Every image is tagged
+      `sha-<full-40-character-commit-sha>` (`type=sha,format=long,prefix=sha-`) -- the *only* tag
+      `cd.yml`'s `deploy` job will ever act on, enforced by a regex check
+      (`^sha-[0-9a-f]{40}$`) before any SSH connection is made. The sanitized branch name and,
+      master only, `latest` are also published as convenience/debugging tags, but neither is ever
+      an accepted `deploy` input -- there is no code path from "push a branch" or "the `latest`
+      tag" to a running production container.
+    - **Publish trigger and the CI gate.** `publish` runs on push to `master` and on
+      `workflow_dispatch` with no `image_tag` given. `ci.yml` triggers on that same `push`, as an
+      independent workflow -- there is no `needs:` across separate workflow files (not expressible;
+      GitHub Actions dependency graphs are per-workflow), and merely asserting "`ci.yml` exists" is
+      not a real gate. Duplicating `ci.yml`'s full Postgres/ClickHouse/dashboard-build suite inside
+      `cd.yml` was rejected as needlessly expensive to run twice per push. Instead, a `ci_gate` job
+      polls the Actions REST API (`gh api repos/<repo>/actions/workflows/ci.yml/runs?head_sha=<sha>`)
+      for *that exact commit's* `ci.yml` run and blocks `publish` until it reports `conclusion:
+      success` (bounded: ~22.5 minutes, then fails closed) -- a real, per-commit dependency on CI's
+      actual outcome, not its existence. `ci_gate` (and therefore `publish`) is skipped entirely
+      when `image_tag` is supplied to `workflow_dispatch`, since a rollback-only run publishes
+      nothing new for CI to have validated.
+    - **Deploy: `workflow_dispatch` only, the `production` Environment, non-overlapping.** `deploy`
+      is skipped unconditionally for every `push` event, however it completes -- the only trigger
+      that can run it is an operator's manual dispatch. It runs under the `production` GitHub
+      Environment (required reviewers / wait timers, if configured there, apply on top of
+      everything below) and `concurrency: {group: deploy-production, cancel-in-progress: false}`,
+      so a second dispatch queues rather than racing or cancelling one already in progress. Leaving
+      `image_tag` blank resolves it to `sha-<the sha this dispatch is running against>` (the exact
+      commit the operator picked in the "Run workflow" branch selector, which is as close as
+      `workflow_dispatch` semantics get to "default to current master" -- there is no supported way
+      to make an input's `default:` itself a dynamic expression); supplying an earlier `sha-<...>`
+      tag deploys that instead, with `ci_gate`/`publish` both skipped -- **no rebuild**, exactly the
+      rollback mechanism this ADR originally promised.
+    - **No fabricated deployment host.** This repository names no server. `deploy` fails closed,
+      before opening any SSH connection, if the `production` Environment is missing any of four
+      required secrets: `DEPLOY_HOST`, `DEPLOY_SSH_USER`, `DEPLOY_SSH_KEY` (a private key whose
+      public half is authorized on that host for that user), `DEPLOY_SSH_KNOWN_HOSTS` (that host's
+      pinned public host key(s), in the same format `ssh-keyscan` prints -- pin it once, out of
+      band, and never fetch it automatically). These are GitHub Environment secrets, entered once
+      by an operator in repository Settings; none of the four is ever committed. `StrictHostKeyChecking`
+      stays at its secure default (`yes`) against the pinned known-hosts file -- never `no`, and
+      no secret is ever echoed to the job log. The deploy host only needs `~/vigil/infrastructure`
+      to exist as an SSH working directory for the `docker compose` invocations below to run from
+      (the same convention this ADR's original "Rollback approach" section, below, already
+      assumed) -- `deploy` itself keeps `docker-compose.prod.yml` and `clickhouse/init/` there
+      current on every run; see "Deployment configuration travels with the image, from the exact
+      same commit" below for how.
+    - **Compose consumes registry images without silently rebuilding.** `infrastructure/
+      docker-compose.prod.yml`'s five application services now each declare both an `image:` (a
+      required variable, `${VIGIL_API_IMAGE:?...}` / `VIGIL_DASHBOARD_IMAGE` / `VIGIL_WORKER_IMAGE`
+      -- no default, so it can never silently resolve to nothing or to `latest`) and their existing
+      `build:`. Both are genuinely needed: `build:` for local/manual building (unchanged usage),
+      `image:` for the deploy path. Getting this combination right required empirical verification,
+      not assumption, because it hides a real footgun: with both keys present, `docker compose up`
+      -- with **no** flag at all, even `pull_policy: always` -- silently falls back to *building
+      from source* the moment a named `image:` tag fails to pull (verified directly against this
+      repository's own compose file). The only combination that fails closed instead is `docker
+      compose pull` (a separate, standalone command -- this one never builds; it hard-errors if a
+      tag is unavailable) followed by `docker compose up --no-build` (which refuses to build even
+      if, somehow, the image were still missing). `cd.yml`'s `deploy` job uses exactly that
+      sequence and no other. Postgres and ClickHouse are untouched -- still the plain upstream
+      `postgres:16-alpine` / `clickhouse/clickhouse-server:24.8-alpine` images, decision 1, never a
+      Vigil registry image.
+    - **Migration ordering, unchanged dependency graph, real exit codes.** `deploy` runs `docker
+      compose pull migrate api dashboard worker poller` (fails closed on any missing tag), then
+      `docker compose up --no-build --exit-code-from migrate migrate` -- which, via the *existing*,
+      unmodified `depends_on: postgres: condition: service_healthy` (decision 7), also starts and
+      waits on `postgres` first, then runs `migrate` to completion and surfaces its real exit code
+      as the command's own exit code. A failed migration fails this step and the job stops there --
+      `api`/`dashboard`/`worker`/`poller` are never started against an unmigrated or
+      partially-migrated schema. Only once that step succeeds does `docker compose up -d --no-build
+      api dashboard worker poller` bring up the long-running services, which still wait on their
+      own pre-existing `depends_on` conditions (`api` on `migrate`/`postgres`/`clickhouse`;
+      `dashboard`/`poller` additionally on `api` being healthy) exactly as decision 9 already
+      specifies -- nothing about that graph is bypassed.
+    - **Health verification, bounded and real.** After services start, `deploy` retries (30
+      attempts, 5s apart, ~2.5 minutes bound) `GET /ready` on `api` (port 8000) and `GET /` on
+      `dashboard` (port 3000), from the deploy host itself over `127.0.0.1` -- not from the GitHub
+      Actions runner, since this repository makes no assumption that `DEPLOY_HOST` is reachable
+      from the public internet. Either endpoint failing to return successfully within the bound
+      fails the job. No automatic rollback follows a failed health check in this commit -- the
+      previous containers are simply left as `docker compose up` left them (still running the prior
+      image, since `up` only replaces a service's container once its new one is healthy/started);
+      recovering is the same manual `workflow_dispatch` with the previous `sha-<commit>` tag
+      described above.
+    - **Rollback assumes schema forward/backward compatibility, not automated downgrade.** Exactly
+      as this ADR's original "Rollback approach" section (below) already stated for the pre-4D
+      manual rollback, this phase adds no automatic Alembic `downgrade`. Rolling back the *image*
+      to an older `sha-<commit>` tag while
+      the database has already been migrated forward by a newer commit is only safe if that newer
+      commit's migration(s) were expand/contract-compatible with the immediately previous
+      application version (additive schema changes the older code simply ignores, not a destructive
+      rename/drop the older code depends on). This is a contract every future migration must
+      uphold for image rollback to remain safe, not something this ADR or `cd.yml` can enforce
+      mechanically.
+    - **Deployment configuration travels with the image, from the exact same commit.** Every
+      `deploy` run -- a fresh publish or a rollback -- resolves `sha-<commit>` to that 40-character
+      commit (the tag *is* the commit; `docker/metadata-action`'s `type=sha,format=long` tag is
+      literally `sha-` followed by the commit it was built from, so no separate lookup is needed),
+      then runs `actions/checkout@v4` with `ref: <that commit>` on the runner -- never the
+      branch/HEAD this workflow happened to trigger from. From that exact checkout, a "Sync
+      deployment configuration to host" step transfers only two paths to the deploy host, over the
+      same pinned SSH connection used everywhere else in this job:
+      `infrastructure/docker-compose.prod.yml` to `~/vigil/infrastructure/docker-compose.prod.yml`,
+      and every file under `infrastructure/clickhouse/init/` to
+      `~/vigil/infrastructure/clickhouse/init/`. This closes the gap the original version of this
+      decision left open: Commit A's image is now always paired with Commit A's Compose file and
+      Commit A's ClickHouse init scripts, whether A is the commit just published or an operator
+      rolling back to it, so the host can never run a newer/older image against a mismatched
+      Compose file. Two things about *how* it transfers are deliberate, not incidental:
+      - The remote `clickhouse/init/` directory is `rm -rf` then recreated before anything is
+        copied into it. This was verified empirically to matter, not assumed: against a real sshd,
+        `scp -r` of a fresh local `init/` onto an already-populated remote `clickhouse/init/`
+        merged in without ever clearing what was already there, so a script renamed or removed
+        since the previous deploy survived as a stale leftover the deploy silently kept running.
+        `rm -rf` before every sync is what makes the destination always reflect exactly the
+        checked-out commit's `clickhouse/init/`, nothing older mixed in. The Compose file, copied
+        to a single named destination path, is simply overwritten in place and has no equivalent
+        staleness case.
+      - Each `clickhouse/init/` file is `scp`'d individually into that freshly-created directory
+        (no `-r`, no bare directory argument), landing directly at
+        `~/vigil/infrastructure/clickhouse/init/<file>`. This sidesteps relying on any particular
+        scp implementation's directory-recursion semantics at all -- which do vary across scp
+        versions/protocols and are easy to get subtly wrong -- rather than assuming a specific one;
+        verified empirically against a real sshd to land flat, never nested as
+        `.../clickhouse/init/init/<file>`.
+      `infrastructure/.env.production` is never a source or destination path in this step, or
+      anywhere else in `cd.yml` -- it stays host-local and operator-owned, exactly as
+      `infrastructure/.env.production.example`'s own comments describe, and this deploy mechanism
+      never reads, writes, or overwrites it.
+      - **Known limitation: a failed pull after a completed sync leaves the on-disk config ahead of
+        what's running.** This sync step runs *before* `docker compose pull` (see the deploy order
+        above). If the pull fails -- a bad or not-yet-public image tag, a registry outage -- the
+        job stops there and no container is ever touched: whatever was running before this dispatch
+        keeps running, unchanged. But `docker-compose.prod.yml` and `clickhouse/init/` on the host
+        have already been overwritten with the *attempted* commit's versions, so until the next
+        successful deploy or rollback resynchronizes them, the on-disk configuration temporarily
+        describes the commit that failed to deploy, not the commit actually running. This is a
+        deliberate tradeoff, not an oversight: an atomic (temp-directory-and-swap) config deploy
+        would close this gap but adds real complexity for a self-healing, narrow-window failure mode
+        that never touches a running container. Not implemented here; revisit only if this actually
+        causes an operator incident.
+
 ## Rollback approach
 
-Compose-native, not automated: `git checkout <previous-tag-or-commit>` followed by `docker compose
+**Registry-image rollback (Phase 4D, F7), for any commit with a published `sha-<commit>` tag:**
+`workflow_dispatch` on `.github/workflows/cd.yml` with `image_tag` set to that tag -- no rebuild.
+The workflow checks out that exact commit and re-syncs `docker-compose.prod.yml` and
+`clickhouse/init/` from it to the deploy host before pulling/starting anything, so the image and
+its deployment configuration always come from the same commit, on a rollback exactly as on a
+forward deploy (see decision 13's "Deployment configuration travels with the image, from the exact
+same commit"). `infrastructure/.env.production` is intentionally excluded from this sync -- it is
+host-local and operator-owned, never versioned, and is therefore never rolled back either; an
+operator who changed it between commit A and commit B must reconcile it themselves before or after
+dispatching a rollback to A. The schema-compatibility caveat in decision 13 ("Rollback assumes
+schema forward/backward compatibility, not automated downgrade") still applies unchanged.
+
+**Compose-native rollback (Phase 4B, unchanged), for anything predating a registry publish, or a
+compose-file-level revert:** `git checkout <previous-tag-or-commit>` followed by `docker compose
 -f infrastructure/docker-compose.prod.yml --env-file infrastructure/.env.production up -d --build`
 rebuilds and restarts every application service from the prior commit's Dockerfiles and source.
 Database rollback uses Alembic's existing, unmodified `downgrade` capability, invoked manually by
 an operator -- this phase does not automate migration rollback, only ensures forward migration
 runs correctly as a container. No blue-green deployment, canary, or automated rollback tooling is
-introduced; that is CI/CD-adjacent scope explicitly deferred past Phase 4B.
+introduced.
 
 ## Known limitations
 
@@ -256,9 +425,8 @@ introduced; that is CI/CD-adjacent scope explicitly deferred past Phase 4B.
   as plain HTTP on the host. TLS termination is assumed to be handled by infrastructure the
   operator already has in front of this stack (a load balancer, an existing reverse proxy) --
   introducing one here would be new infrastructure beyond Phase 4B's approved scope.
-- **No CI/CD, registry, or automated image-publishing pipeline.** Images are built locally by
-  `docker compose ... up --build`; pushing to a registry and referencing images by tag is a
-  natural next step but explicitly deferred, along with backup/restore tooling.
+- **~~No CI/CD, registry, or automated image-publishing pipeline~~ -- resolved, Phase 4D (F7).**
+  See decision 13.
 - **~~No structured logging~~ -- resolved, Phase 4D (F4).** `apps/api` and `services/worker` each
   gained a small, stdlib-only `logging_config.py` (deliberately duplicated, not shared, per ADR 001
   decision 6 -- these are two independently deployable services) that replaces
@@ -289,6 +457,11 @@ introduced; that is CI/CD-adjacent scope explicitly deferred past Phase 4B.
   (`--build-context evaluator=services/evaluator` / `additional_contexts:`); a plain `docker build
   services/worker` (or `apps/dashboard`) without it will fail with an unresolvable path dependency
   or missing lockfile, respectively. This is documented at the top of each Dockerfile.
-- Future work reintroducing rate limiting, CI/CD, TLS termination, or backup/restore should treat
-  this ADR's Compose topology as the base to extend, not redesign, unless a genuine architectural
-  reason emerges.
+- Future work reintroducing rate limiting, TLS termination, or backup/restore should treat this
+  ADR's Compose topology as the base to extend, not redesign, unless a genuine architectural reason
+  emerges.
+- `ci.yml`'s `docker-build` matrix and `cd.yml`'s `publish` matrix duplicate the same three
+  (context, dockerfile, build-contexts) triples by necessity -- one validates a build with no push,
+  the other pushes. Adding a fourth service/image later means updating both, plus
+  `docker-compose.prod.yml`'s corresponding `image:`/`build:` pair and
+  `infrastructure/.env.production.example`.

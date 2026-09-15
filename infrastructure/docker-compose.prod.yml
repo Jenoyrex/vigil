@@ -5,7 +5,36 @@
 # docs/decisions/006-deployment-architecture.md for the full rationale
 # behind every decision encoded here.
 #
-# Usage (from the repository root):
+# Every application service (migrate/api/dashboard/worker/poller) declares
+# BOTH `image:` and `build:` (Phase 4D, F7). `image:` is a required
+# (`${VAR:?...}`), env-var-driven GHCR reference with no `latest`/branch
+# fallback, so a value must always be supplied explicitly -- see
+# infrastructure/.env.production.example. `build:` is kept, unchanged, for
+# local/manual building. These two modes are NOT safely interchangeable by
+# accident: `docker compose up` without `--no-build` will silently fall back
+# to building from source the moment a named `image:` tag fails to pull
+# (verified empirically -- see docs/decisions/006-deployment-architecture.md,
+# decision 13), even with `pull_policy: always`. The only combination proven
+# to fail closed instead of silently building is `docker compose pull`
+# (never builds; hard-errors if the tag is unavailable) followed by
+# `docker compose up --no-build` (refuses to build even if the image is
+# somehow still missing). The automated deploy workflow
+# (.github/workflows/cd.yml) always uses exactly that sequence; use it too
+# for any manual registry-image deploy.
+#
+# Usage -- registry images (production; requires VIGIL_API_IMAGE,
+# VIGIL_DASHBOARD_IMAGE, VIGIL_WORKER_IMAGE set, e.g. via shell env, since
+# infrastructure/.env.production intentionally does not pin one -- see that
+# file's own comments):
+#   docker compose -f infrastructure/docker-compose.prod.yml \
+#     --env-file infrastructure/.env.production pull
+#   docker compose -f infrastructure/docker-compose.prod.yml \
+#     --env-file infrastructure/.env.production up -d --no-build
+#
+# Usage -- local build (unchanged from Phase 4B; the three image vars above
+# must still be set to *some* validly-shaped reference, even a placeholder,
+# since `image:` is a required variable, but `--build` builds and tags with
+# it locally rather than pulling it):
 #   docker compose -f infrastructure/docker-compose.prod.yml \
 #     --env-file infrastructure/.env.production up -d --build
 
@@ -69,6 +98,7 @@ services:
   # immediately visible as this service's own non-zero exit rather than a
   # silently-degraded api container.
   migrate:
+    image: ${VIGIL_API_IMAGE:?Set VIGIL_API_IMAGE (e.g. ghcr.io/<owner>/vigil-api:sha-<commit>) -- see infrastructure/.env.production.example}
     build:
       context: ../apps/api
       dockerfile: Dockerfile
@@ -90,6 +120,7 @@ services:
         condition: service_healthy
 
   api:
+    image: ${VIGIL_API_IMAGE:?Set VIGIL_API_IMAGE (e.g. ghcr.io/<owner>/vigil-api:sha-<commit>) -- see infrastructure/.env.production.example}
     build:
       context: ../apps/api
       dockerfile: Dockerfile
@@ -113,6 +144,7 @@ services:
         condition: service_completed_successfully
 
   dashboard:
+    image: ${VIGIL_DASHBOARD_IMAGE:?Set VIGIL_DASHBOARD_IMAGE (e.g. ghcr.io/<owner>/vigil-dashboard:sha-<commit>) -- see infrastructure/.env.production.example}
     build:
       context: ../apps/dashboard
       dockerfile: Dockerfile
@@ -135,6 +167,7 @@ services:
   # (services/worker/worker/runtime.py) depends on to bring a fresh,
   # zero-orphan replacement back up after this process retires itself.
   worker:
+    image: ${VIGIL_WORKER_IMAGE:?Set VIGIL_WORKER_IMAGE (e.g. ghcr.io/<owner>/vigil-worker:sha-<commit>) -- see infrastructure/.env.production.example}
     build:
       context: ../services/worker
       dockerfile: Dockerfile
@@ -168,6 +201,7 @@ services:
   # internal job-creation endpoint over HTTP (worker/poller.py), unlike
   # the runtime loop above, which never talks to api at all.
   poller:
+    image: ${VIGIL_WORKER_IMAGE:?Set VIGIL_WORKER_IMAGE (e.g. ghcr.io/<owner>/vigil-worker:sha-<commit>) -- see infrastructure/.env.production.example}
     build:
       context: ../services/worker
       dockerfile: Dockerfile
