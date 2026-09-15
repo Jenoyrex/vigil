@@ -71,10 +71,13 @@ WORKDIR /app
 
 # .next/standalone already contains only the traced production
 # node_modules subset plus server.js -- Next.js deliberately excludes
-# .next/static and public/ from it, so both are copied in separately.
+# .next/static from it, so it's copied in separately. public/ is NOT
+# copied: this app has no public/ directory (see next.config.ts's img-src
+# comment -- no <img>/next/image usage, no static assets; the favicon is
+# served from app/favicon.ico, the App Router convention, not public/). If
+# apps/dashboard ever gains a public/ directory, add it back here.
 COPY --from=builder --chown=vigil:vigil /build/apps/dashboard/.next/standalone/. ./
 COPY --from=builder --chown=vigil:vigil /build/apps/dashboard/.next/static ./apps/dashboard/.next/static
-COPY --from=builder --chown=vigil:vigil /build/apps/dashboard/public ./apps/dashboard/public
 
 ENV NODE_ENV=production \
     PORT=3000 \
