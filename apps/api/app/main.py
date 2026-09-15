@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 from app.api.v1.analytics import router as analytics_router
 from app.api.v1.evaluations import router as evaluations_router
+from app.api.v1.provisioning import router as provisioning_router
 from app.api.v1.traces import router as traces_router
 from app.clickhouse.client import get_clickhouse_client
 from app.config import settings
@@ -45,6 +46,7 @@ app.add_middleware(RequestIdMiddleware)
 app.include_router(traces_router)
 app.include_router(analytics_router)
 app.include_router(evaluations_router)
+app.include_router(provisioning_router)
 
 
 class HealthResponse(BaseModel):

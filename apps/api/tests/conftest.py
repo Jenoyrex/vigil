@@ -33,7 +33,8 @@ _TestSessionLocal = sessionmaker(bind=_engine, autoflush=False, expire_on_commit
 
 _TABLES = (
     "evaluation_jobs, evaluator_configs, evaluation_poller_checkpoint, "
-    "api_keys, organization_memberships, projects, organizations, users"
+    "provisioning_bootstrap, api_keys, organization_memberships, projects, "
+    "organizations, users"
 )
 
 

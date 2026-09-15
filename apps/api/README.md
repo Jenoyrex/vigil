@@ -125,16 +125,20 @@ curl http://127.0.0.1:8000/ready
 
 ### API-key authentication
 
-There is no key-issuance HTTP endpoint yet. For local development, mint a key against a demo
-project with:
+For local development, mint a key against a demo project with:
 
 ```bash
 uv run python scripts/seed_local_api_key.py
 ```
 
-This prints a raw key exactly once — e.g. `vgl_41ce27b462d0.jeK-Mf6i9aRYOrQvm1ZbNYD3aFibJdzHcmbLEAJ592c`
-— and cannot be recovered afterwards; the database only ever stores a SHA-256 hash of it
-(`app/security/api_keys.py`), never the raw value.
+For a production deployment's first key, see "Provisioning" below instead —
+`POST /v1/provisioning/bootstrap` is the HTTP equivalent of this script, protected by a
+one-time bootstrap secret.
+
+Either way, the raw key is printed/returned exactly once — e.g.
+`vgl_41ce27b462d0.jeK-Mf6i9aRYOrQvm1ZbNYD3aFibJdzHcmbLEAJ592c` — and cannot be recovered
+afterwards; the database only ever stores a SHA-256 hash of it (`app/security/api_keys.py`),
+never the raw value.
 
 Send it as `Authorization: Bearer <api-key>`. On each request the API:
 
@@ -342,6 +346,130 @@ cors_allowed_origins_list` raises) -- wildcard CORS is not supported by this API
 manually typed into the environment.
 
 See `docs/decisions/007-cors-and-dashboard-security-headers.md` for the full rationale.
+
+## Provisioning
+
+`POST /v1/provisioning/bootstrap` (Phase 4D, F3) is the production, HTTP-based equivalent of
+`scripts/seed_local_api_key.py`: a one-time way to create the first organization, project, and
+API key in a deployment where an operator may not have (or want) direct database access. It is
+**bootstrap provisioning for a single trusted operator, not a public signup system** — there is
+no user-facing authentication anywhere in this codebase (no passwords, sessions, or OAuth), and
+this endpoint does not add one.
+
+### Enabling it
+
+The endpoint is disabled by default and returns `401` for every request until an operator
+explicitly opts in. Set a real, high-entropy secret **only in the specific environment you are
+about to bootstrap, for as long as you need it**:
+
+```bash
+# 1. Generate a secret.
+openssl rand -hex 32
+
+# 2. Add it to infrastructure/.env.production (never commit this file):
+#      VIGIL_API_BOOTSTRAP_SECRET=<generated-secret>
+# 3. Recreate just the api container so it picks up the new value:
+docker compose -f infrastructure/docker-compose.prod.yml \
+  --env-file infrastructure/.env.production up -d api
+
+# 4. Call the endpoint (see "Calling it" below).
+
+# 5. Remove VIGIL_API_BOOTSTRAP_SECRET from infrastructure/.env.production again,
+#    then recreate api once more so bootstrap goes back to disabled:
+docker compose -f infrastructure/docker-compose.prod.yml \
+  --env-file infrastructure/.env.production up -d api
+```
+
+Never commit a real value — `apps/api/.env.example`'s own `VIGIL_API_BOOTSTRAP_SECRET=` line is
+deliberately empty and must stay that way.
+
+### Calling it
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/provisioning/bootstrap \
+  -H "X-Vigil-Bootstrap-Token: <the secret from above>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "organization_name": "Acme Corp",
+    "organization_slug": "acme-corp",
+    "project_name": "Production",
+    "project_slug": "production",
+    "api_key_name": "Production key"
+  }'
+```
+
+On success (`201`), the response contains `organization_id`, `project_id`, `api_key_id`, and
+`api_key` — the plaintext key, **shown exactly once and never retrievable again** (only its
+SHA-256 hash is ever persisted, identically to `scripts/seed_local_api_key.py`'s own key
+issuance). Copy it immediately.
+
+### Repeated calls
+
+Bootstrap succeeds **at most once per deployment** — a second call, whether sent later or
+concurrently with the first, always receives `409 Conflict` and creates nothing. This is enforced
+by the database in two layers, not merely an application-level check: (1) `organizations` being
+non-empty is checked first, before anything else, and alone refuses any repeat call; (2) an
+atomic, conflict-checked insert against a dedicated single-row table (`provisioning_bootstrap`)
+is what makes a *successful* run safe even when two bootstrap requests genuinely race with each
+other. See `app/services/provisioning.py`'s module docstring for the full argument.
+
+**There is no "just delete a row" way to re-enable bootstrap, and none should ever be
+documented as one.** `provisioning_bootstrap` is an audit record, not the only gate — deleting
+only that row does **not** delete the organization/project/API key it points to, so bootstrap
+would still refuse (layer (1) above still sees the organization). Re-enabling bootstrap requires
+a full, destructive teardown of everything the original run created:
+
+```sql
+-- 1. Find the organization bootstrap created.
+SELECT organization_id FROM provisioning_bootstrap WHERE id = 'bootstrap';
+
+-- 2. Substitute that UUID for <org-id> below and run as ONE transaction, in
+--    exactly this order (api_keys/projects reference organizations with
+--    ondelete=RESTRICT, so this order is required, not just convention).
+--
+--    DESTRUCTIVE. Irrecoverably deletes the organization, its project(s),
+--    and its API key(s). This is an operator-level, disposable
+--    development/staging procedure -- NEVER run this against a production
+--    deployment holding real data, and never expose it through any API.
+BEGIN;
+DELETE FROM api_keys WHERE project_id IN (SELECT id FROM projects WHERE organization_id = '<org-id>');
+DELETE FROM projects WHERE organization_id = '<org-id>';
+DELETE FROM provisioning_bootstrap WHERE id = 'bootstrap';
+DELETE FROM organizations WHERE id = '<org-id>';
+COMMIT;
+```
+
+After this, `organizations` is empty again (assuming it held only the bootstrapped org) and
+`POST /v1/provisioning/bootstrap` will succeed again. Note that the up-front `organizations`
+check also refuses bootstrap if *any other* organization exists in this database for any reason
+(e.g. one created by `scripts/seed_local_api_key.py`) — a full clean slate means that table is
+empty, not just that this one organization is gone.
+
+### Rotating or revoking the resulting key
+
+There is no HTTP endpoint for this yet — use direct database access, the same way
+`scripts/seed_local_api_key.py`-issued keys are managed today:
+
+```sql
+UPDATE api_keys SET status = 'revoked', revoked_at = now() WHERE id = '<api_key_id>';
+```
+
+Minting a replacement key today also means direct database access (insert a new `api_keys` row
+via `scripts/seed_local_api_key.py`'s pattern, or `psql`) — an HTTP key-management endpoint is
+tracked as a known gap, not solved by this phase.
+
+### Security limitations, explicitly
+
+This is a minimal bootstrap mechanism, not a complete provisioning/identity system:
+
+- It authenticates via a single shared secret (`X-Vigil-Bootstrap-Token`, compared with
+  `hmac.compare_digest`), not per-operator credentials — anyone with the secret can bootstrap.
+- It rate-limits by client IP (`VIGIL_API_BOOTSTRAP_RATE_LIMIT_*`, in-process, no Redis) to slow
+  brute-forcing the secret, not to prevent it outright — use a real, high-entropy secret.
+- It creates no `users`/`organization_memberships` rows — this system has no user-facing
+  authentication to attach one to yet (see `app/services/provisioning.py`'s module docstring).
+- It never accepts a customer `vgl_*` API key as authorization, and a customer key can never
+  provision additional organizations/projects/keys through it.
 
 ## Logging
 
