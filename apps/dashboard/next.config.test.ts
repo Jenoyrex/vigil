@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 /**
  * `next.config.ts`'s `headers()` reads `process.env.NODE_ENV` once, at
- * module-evaluation time, to decide whether to include CSP/HSTS -- so each
+ * module-evaluation time, to decide whether to include HSTS -- so each
  * test that cares about a specific environment sets `NODE_ENV`, resets
  * Vitest's module registry (`vi.resetModules()`), and re-imports with the
  * same static specifier. A dynamically-computed specifier (e.g. a
@@ -44,47 +44,30 @@ describe("next.config.ts headers()", () => {
     expect(keys).toContain("X-Frame-Options");
   });
 
-  it("omits CSP and HSTS outside production (so `next dev` is never affected)", async () => {
+  it("omits HSTS outside production (so `next dev` is never affected)", async () => {
     const headers = await loadHeaders("development");
     const keys = headers.map((header) => header.key);
-    expect(keys).not.toContain("Content-Security-Policy");
     expect(keys).not.toContain("Strict-Transport-Security");
   });
 
-  it("includes CSP and HSTS in production", async () => {
+  it("includes HSTS in production", async () => {
     const headers = await loadHeaders("production");
     const keys = headers.map((header) => header.key);
-    expect(keys).toContain("Content-Security-Policy");
     expect(keys).toContain("Strict-Transport-Security");
   });
 
-  it("production CSP keeps script-src strict with no unsafe-inline/unsafe-eval", async () => {
-    const headers = await loadHeaders("production");
-    const csp = headers.find((header) => header.key === "Content-Security-Policy")?.value ?? "";
-    const scriptSrcDirective = csp.split(";").find((part) => part.trim().startsWith("script-src"));
-    expect(scriptSrcDirective).toBe(" script-src 'self'");
-  });
-
-  it("production CSP allows 'unsafe-inline' only for style-src, not script-src", async () => {
-    const headers = await loadHeaders("production");
-    const csp = headers.find((header) => header.key === "Content-Security-Policy")?.value ?? "";
-    expect(csp).toContain("style-src 'self' 'unsafe-inline'");
-    expect(csp).not.toContain("unsafe-eval");
-  });
-
-  it("production CSP denies framing and object embeds", async () => {
-    const headers = await loadHeaders("production");
-    const csp = headers.find((header) => header.key === "Content-Security-Policy")?.value ?? "";
-    expect(csp).toContain("frame-ancestors 'none'");
-    expect(csp).toContain("object-src 'none'");
-  });
-
-  it("production CSP scopes connect-src/img-src/font-src to same-origin only", async () => {
-    const headers = await loadHeaders("production");
-    const csp = headers.find((header) => header.key === "Content-Security-Policy")?.value ?? "";
-    expect(csp).toContain("connect-src 'self'");
-    expect(csp).toContain("img-src 'self'");
-    expect(csp).toContain("font-src 'self'");
+  it("never sets Content-Security-Policy, in any environment", async () => {
+    // CSP lives in proxy.ts now, because it needs a fresh per-request nonce
+    // -- see proxy.ts for the full policy and the reasoning. If this
+    // static config ever set CSP again alongside proxy.ts's, the browser
+    // would enforce the intersection of both headers, and a static
+    // `script-src` with no matching nonce would silently block every
+    // nonce'd script again (the exact bug this split fixes). This test is
+    // a regression guard against that specific way of undoing the fix.
+    const devHeaders = await loadHeaders("development");
+    const prodHeaders = await loadHeaders("production");
+    expect(devHeaders.map((header) => header.key)).not.toContain("Content-Security-Policy");
+    expect(prodHeaders.map((header) => header.key)).not.toContain("Content-Security-Policy");
   });
 
   it("X-Frame-Options denies all framing", async () => {
