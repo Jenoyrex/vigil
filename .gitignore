@@ -64,3 +64,9 @@ Desktop.ini
 dist/
 build/
 .turbo/
+
+# ---- Backups (infrastructure/backup/*.sh output -- real customer/control-
+# plane data, never committed; see docs/decisions/008-backup-restore.md) ----
+infrastructure/backup/output/
+*.dump
+*.native
