@@ -1,5 +1,6 @@
 """Upgrade/downgrade verification for
 alembic/versions/2925f09e0276_add_provisioning_bootstrap.py (Phase 4D, F3)
+and alembic/versions/ad0d41d7d82c_add_dashboard_sessions.py (Phase 4D, F1)
 against a real PostgreSQL database.
 
 Invokes `alembic` as a subprocess with `VIGIL_API_DATABASE_URL` pinned to
@@ -68,9 +69,31 @@ def test_provisioning_bootstrap_migration_upgrade_downgrade_upgrade() -> None:
     assert _table_exists("provisioning_bootstrap")
 
     try:
-        _run_alembic("downgrade", "-1")
+        # Explicit target revision, not "-1": a later migration
+        # (ad0d41d7d82c, dashboard_sessions) now sits on top of this one at
+        # head, so "-1" from head would only revert that later migration,
+        # not this one. "18f8ea1539cc" is 2925f09e0276's own down_revision
+        # -- downgrading to it necessarily reverts everything after,
+        # including 2925f09e0276 itself.
+        _run_alembic("downgrade", "18f8ea1539cc")
         assert not _table_exists("provisioning_bootstrap")
     finally:
         _run_alembic("upgrade", "head")
 
     assert _table_exists("provisioning_bootstrap")
+
+
+def test_dashboard_sessions_migration_upgrade_downgrade_upgrade() -> None:
+    _run_alembic("upgrade", "head")
+    assert _table_exists("dashboard_sessions")
+
+    try:
+        _run_alembic("downgrade", "2925f09e0276")
+        assert not _table_exists("dashboard_sessions")
+        # The migration below it in the chain is untouched by this
+        # downgrade -- proves the downgrade() only reverted its own table.
+        assert _table_exists("provisioning_bootstrap")
+    finally:
+        _run_alembic("upgrade", "head")
+
+    assert _table_exists("dashboard_sessions")

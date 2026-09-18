@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useState } from "react";
 
 import { cn } from "@/lib/cn";
+import { Button } from "@/components/ui/Button";
 
 const NAV_ITEMS = [
   { href: "/", label: "Overview" },
@@ -12,8 +14,36 @@ const NAV_ITEMS = [
   { href: "/evaluations", label: "Evaluations" },
 ] as const;
 
+/**
+ * POST /api/auth/logout, then navigate to /login and refresh so every
+ * Server Component re-reads the now-cleared session cookie.
+ */
+function LogoutButton() {
+  const router = useRouter();
+  const [loggingOut, setLoggingOut] = useState(false);
+
+  async function handleLogout(): Promise<void> {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await fetch("/api/auth/logout", { method: "POST", cache: "no-store" });
+    } finally {
+      router.push("/login");
+      router.refresh();
+    }
+  }
+
+  return (
+    <Button variant="ghost" onClick={() => void handleLogout()} disabled={loggingOut}>
+      {loggingOut ? "Logging out…" : "Log out"}
+    </Button>
+  );
+}
+
 export function TopNav() {
   const pathname = usePathname();
+
+  if (pathname === "/login") return null;
 
   return (
     <header className="border-b border-border bg-surface">
@@ -39,6 +69,9 @@ export function TopNav() {
             );
           })}
         </nav>
+        <div className="ml-auto">
+          <LogoutButton />
+        </div>
       </div>
     </header>
   );

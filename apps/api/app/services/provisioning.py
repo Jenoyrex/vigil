@@ -1,4 +1,5 @@
-"""Business logic for `POST /v1/provisioning/bootstrap` (Phase 4D, F3) --
+"""Business logic for `POST /v1/provisioning/bootstrap` (Phase 4D, F3;
+extended in Phase 4D F1 to also create the first dashboard user) --
 production provisioning/onboarding. See docs/decisions/
 006-deployment-architecture.md's "Known limitations" (the gap this closes)
 and app/api/v1/provisioning.py's module docstring for the endpoint's full
@@ -8,13 +9,27 @@ security model. This module owns only the database work; authentication
 request ever reaches here.
 
 **This is bootstrap provisioning, not a signup system.** It creates exactly
-one organization, one project, and one API key, and is designed to succeed
-at most once ever for a given deployment -- see `bootstrap_provisioning`'s
+one organization, one project, one API key, and (as of Phase 4D F1) one
+dashboard owner user + owner membership, and is designed to succeed at
+most once ever for a given deployment -- see `bootstrap_provisioning`'s
 own docstring for the exact concurrency/atomicity argument. There is no
-user/membership creation here (deliberately -- see that docstring), no
-password, no session, and no way to provision a *second* tenant through
-this endpoint; ADR 005/006's existing "single-operator architecture"
-framing is unchanged, not extended, by this module.
+way to provision a *second* tenant, or a second/additional user, through
+this endpoint -- ADR 005/006's existing "single-operator architecture"
+framing is unchanged, not extended, by this module; this remains a
+one-time bootstrap action, not an ongoing signup/invite system.
+
+**Why user/membership creation belongs here now, when it previously did
+not.** This module's own prior version documented, correctly at the time,
+that introducing a user here would mean "inventing who that user is" for
+"zero functional benefit" -- true when this API had no user-facing
+authentication at all. Phase 4D F1 adds real dashboard login
+(`app.services.auth`, backed by `users.hashed_password`/
+`organization_memberships`), which needs a first user to exist
+*somewhere*; bootstrap is that place, for the same reason it is already
+the place `organizations`/`projects`/`api_keys` are minted -- a single,
+atomic, one-time, database-enforced-safe-under-concurrency action, not a
+second, parallel "create a user" endpoint with its own security model to
+maintain.
 
 **The invariant is "no organization exists yet," not merely "the
 `provisioning_bootstrap` marker row is absent."** These were briefly
@@ -45,9 +60,17 @@ from dataclasses import dataclass
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.db.models import APIKey, Organization, Project, ProvisioningBootstrap
+from app.db.models import (
+    APIKey,
+    Organization,
+    OrganizationMembership,
+    Project,
+    ProvisioningBootstrap,
+    User,
+)
 from app.db.models.provisioning_bootstrap import BOOTSTRAP_ROW_ID
 from app.security.api_keys import generate_api_key
+from app.security.passwords import hash_password
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +81,8 @@ class BootstrapResult:
     project_id: uuid.UUID
     api_key_id: uuid.UUID
     api_key: str
+    user_id: uuid.UUID
+    owner_email: str
 
 
 def bootstrap_provisioning(
@@ -68,12 +93,18 @@ def bootstrap_provisioning(
     project_name: str,
     project_slug: str,
     api_key_name: str,
+    owner_email: str,
+    owner_full_name: str | None,
+    owner_password: str,
 ) -> BootstrapResult | None:
-    """Creates one organization, one project, and one API key in a single
-    transaction, and returns the result -- including the plaintext API key,
-    which exists only in this return value and the HTTP response built from
-    it; `app.security.api_keys.generate_api_key` never persists it, and
-    nothing in this function does either.
+    """Creates one organization, one project, one API key, one dashboard
+    owner user, and one owner-role membership, all in a single transaction,
+    and returns the result -- including the plaintext API key, which
+    exists only in this return value and the HTTP response built from it;
+    `app.security.api_keys.generate_api_key` never persists it, and
+    nothing in this function does either. `owner_password` is likewise
+    never returned or logged -- only its `hash_password` output is ever
+    persisted, on the new `User` row.
 
     Returns `None` if bootstrap has already run, or an organization already
     exists for any other reason (mapped to a 409 by the caller) -- never
@@ -133,15 +164,16 @@ def bootstrap_provisioning(
     `project_id` from the presented API key exactly as it always has,
     completely independent of this table's existence.
 
-    **No user/membership row.** `apps/api/scripts/seed_local_api_key.py`
-    (the pre-existing local-dev equivalent of this endpoint) already
-    establishes the precedent: `organizations`/`projects`/`api_keys` are
-    the minimum viable set for a *usable* project, and
-    `app.api.deps.get_current_api_key`'s own authorization path never
-    touches `users`/`organization_memberships` either. Introducing one here
-    would mean inventing who that user "is" (an email? a password? Phase
-    4D's F3 scope is explicitly provisioning, not an identity system) for
-    zero functional benefit today.
+    **The new user/membership rows are ordinary participants in the same
+    transaction, not a special case.** `app.api.deps.get_current_api_key`'s
+    own authorization path (customer telemetry-API access) still never
+    touches `users`/`organization_memberships` at all -- this function
+    creating a `User`/`OrganizationMembership` row changes nothing about
+    that; the two authentication paths (customer API key vs. dashboard
+    login) remain fully independent, per this phase's investigation
+    report. `owner_password` is hashed via `app.security.passwords.
+    hash_password` (scrypt) before it ever reaches this function's `User`
+    row -- the plaintext value is never persisted, logged, or returned.
     """
     if db.query(Organization.id).first() is not None:
         # Already bootstrapped (via this function, ever), or an operator
@@ -166,6 +198,21 @@ def bootstrap_provisioning(
     db.add(api_key)
     db.flush()
 
+    user = User(
+        email=owner_email,
+        full_name=owner_full_name,
+        hashed_password=hash_password(owner_password),
+        is_active=True,
+    )
+    db.add(user)
+    db.flush()
+
+    membership = OrganizationMembership(
+        user_id=user.id, organization_id=organization.id, role="owner"
+    )
+    db.add(membership)
+    db.flush()
+
     claim_stmt = (
         pg_insert(ProvisioningBootstrap)
         .values(id=BOOTSTRAP_ROW_ID, organization_id=organization.id)
@@ -182,12 +229,14 @@ def bootstrap_provisioning(
 
     db.commit()
 
-    # NEVER the raw key, NEVER the bootstrap secret -- only identifiers, the
-    # same discipline every other structured log call site in this codebase
-    # follows (see app/logging_config.py's security note). key_prefix is
-    # deliberately safe to log (app/security/api_keys.py's own module
-    # docstring: it exists specifically so a key can be identified in logs
-    # without exposing the secret half).
+    # NEVER the raw key, NEVER the plaintext password, NEVER the bootstrap
+    # secret -- only identifiers, the same discipline every other
+    # structured log call site in this codebase follows (see
+    # app/logging_config.py's security note). key_prefix is deliberately
+    # safe to log (app/security/api_keys.py's own module docstring: it
+    # exists specifically so a key can be identified in logs without
+    # exposing the secret half); user.email is likewise an identifier, not
+    # a secret, and safe to log for the same reason.
     logger.info(
         "provisioning bootstrap completed",
         extra={
@@ -195,6 +244,8 @@ def bootstrap_provisioning(
             "project_id": str(project.id),
             "api_key_id": str(api_key.id),
             "api_key_prefix": key_prefix,
+            "user_id": str(user.id),
+            "owner_email": user.email,
         },
     )
 
@@ -203,4 +254,6 @@ def bootstrap_provisioning(
         project_id=project.id,
         api_key_id=api_key.id,
         api_key=raw_key,
+        user_id=user.id,
+        owner_email=user.email,
     )

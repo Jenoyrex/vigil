@@ -152,3 +152,30 @@ def get_bootstrap_auth(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_BOOTSTRAP_TOKEN_DETAIL
         )
+
+
+SESSION_TOKEN_HEADER = "X-Vigil-Session-Token"
+
+
+def get_session_token(
+    x_vigil_session_token: str | None = Header(default=None, alias=SESSION_TOKEN_HEADER),
+) -> str | None:
+    """Extracts a presented dashboard session token for `GET /v1/auth/session`
+    and `POST /v1/auth/logout` (Phase 4D, F1) -- a dedicated header, never
+    `Authorization: Bearer`, structurally identical in spirit to
+    `get_internal_service_auth`/`get_bootstrap_auth` above: a wholly
+    separate trust boundary from customer API-key authentication. A
+    customer's `vgl_*` key presented in this header authenticates nothing
+    -- this dependency doesn't look at the `api_keys` table at all, and
+    `app.services.auth.validate_session`/`revoke_session` only ever
+    compare against `dashboard_sessions.token_hash`.
+
+    Deliberately does not itself raise on a missing/invalid token (unlike
+    `get_bootstrap_auth`/`get_internal_service_auth`): the two callers need
+    different behavior on "no token presented" -- `GET /v1/auth/session`
+    must still return its generic 401, while `POST /v1/auth/logout` treats
+    it as an already-logged-out no-op (see that route's own docstring) --
+    so each decides that for itself from the plain `str | None` this
+    returns.
+    """
+    return x_vigil_session_token

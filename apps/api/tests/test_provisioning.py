@@ -25,7 +25,14 @@ from sqlalchemy.orm import Session, sessionmaker
 import conftest
 from app.api.rate_limit import RateLimiter, get_bootstrap_rate_limiter
 from app.config import settings
-from app.db.models import APIKey, Organization, Project, ProvisioningBootstrap
+from app.db.models import (
+    APIKey,
+    Organization,
+    OrganizationMembership,
+    Project,
+    ProvisioningBootstrap,
+    User,
+)
 from app.main import app
 from app.services.provisioning import bootstrap_provisioning
 from helpers import valid_traces_payload
@@ -77,6 +84,9 @@ def _payload(**overrides) -> dict:
         "project_name": f"Production {unique}",
         "project_slug": f"production-{unique}",
         "api_key_name": "Bootstrap key",
+        "owner_email": f"owner-{unique}@example.com",
+        "owner_full_name": "Ada Lovelace",
+        "owner_password": "correct horse battery staple",
     }
     payload.update(overrides)
     return payload
@@ -101,6 +111,8 @@ def test_valid_bootstrap_secret_succeeds(client: TestClient, monkeypatch) -> Non
         "project_id",
         "api_key_id",
         "api_key",
+        "user_id",
+        "owner_email",
         "warning",
     }
     assert body["api_key"].startswith("vgl_")
@@ -295,6 +307,141 @@ def test_tenant_scoping_is_correct(client: TestClient, fake_repository, monkeypa
     assert row["project_id"] == uuid.UUID(body["project_id"])
 
 
+def test_bootstrap_creates_owner_user_with_hashed_password(
+    client: TestClient, db_session: Session, monkeypatch
+) -> None:
+    from app.security.passwords import verify_password
+
+    _with_secret(monkeypatch)
+    payload = _payload(owner_password="a very real password 123")
+
+    response = client.post(BOOTSTRAP_URL, json=payload, headers={BOOTSTRAP_HEADER: TEST_SECRET})
+
+    assert response.status_code == 201
+    body = response.json()
+
+    user = db_session.query(User).filter(User.id == uuid.UUID(body["user_id"])).one()
+    assert user.email == payload["owner_email"]
+    assert user.full_name == payload["owner_full_name"]
+    assert user.is_active is True
+    assert user.hashed_password is not None
+    assert user.hashed_password != payload["owner_password"]
+    assert payload["owner_password"] not in user.hashed_password
+    assert verify_password(payload["owner_password"], user.hashed_password) is True
+
+
+def test_bootstrap_creates_owner_membership(
+    client: TestClient, db_session: Session, monkeypatch
+) -> None:
+    _with_secret(monkeypatch)
+
+    response = client.post(BOOTSTRAP_URL, json=_payload(), headers={BOOTSTRAP_HEADER: TEST_SECRET})
+
+    assert response.status_code == 201
+    body = response.json()
+
+    membership = (
+        db_session.query(OrganizationMembership)
+        .filter(OrganizationMembership.user_id == uuid.UUID(body["user_id"]))
+        .one()
+    )
+    assert membership.organization_id == uuid.UUID(body["organization_id"])
+    assert membership.role == "owner"
+
+
+def test_bootstrap_response_never_includes_the_password(
+    client: TestClient, monkeypatch
+) -> None:
+    _with_secret(monkeypatch)
+    payload = _payload(owner_password="a very unique password marker 987654")
+
+    response = client.post(BOOTSTRAP_URL, json=payload, headers={BOOTSTRAP_HEADER: TEST_SECRET})
+
+    assert response.status_code == 201
+    assert "owner_password" not in response.json()
+    assert payload["owner_password"] not in response.text
+
+
+def test_bootstrap_owner_can_then_log_in(client: TestClient, monkeypatch) -> None:
+    """End-to-end proof that the password bootstrap sets is the same one
+    POST /v1/auth/login accepts -- not merely that a hash was stored."""
+    _with_secret(monkeypatch)
+    payload = _payload()
+
+    bootstrap_response = client.post(
+        BOOTSTRAP_URL, json=payload, headers={BOOTSTRAP_HEADER: TEST_SECRET}
+    )
+    assert bootstrap_response.status_code == 201
+
+    login_response = client.post(
+        "/v1/auth/login",
+        json={"email": payload["owner_email"], "password": payload["owner_password"]},
+    )
+    assert login_response.status_code == 200
+    assert "session_token" in login_response.json()
+
+
+def test_bootstrap_password_and_hash_never_appear_in_log_output(
+    client: TestClient, monkeypatch
+) -> None:
+    import logging
+
+    from app.logging_config import JsonFormatter
+
+    _with_secret(monkeypatch)
+    payload = _payload(owner_password="a very unique password marker for logging 555")
+
+    class _CapturingHandler(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setFormatter(JsonFormatter(service="api"))
+            self.lines: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.lines.append(self.format(record))
+
+    capture = _CapturingHandler()
+    root = logging.getLogger()
+    root.addHandler(capture)
+    try:
+        response = client.post(
+            BOOTSTRAP_URL, json=payload, headers={BOOTSTRAP_HEADER: TEST_SECRET}
+        )
+    finally:
+        root.removeHandler(capture)
+
+    assert response.status_code == 201
+    full_output = "\n".join(capture.lines)
+    assert payload["owner_password"] not in full_output
+    # scrypt-encoded hashes always contain "scrypt$" -- a coarse but
+    # effective proof no hash value leaked into a log line either.
+    assert "scrypt$" not in full_output
+
+
+def test_owner_password_too_short_is_422(client: TestClient, monkeypatch) -> None:
+    _with_secret(monkeypatch)
+
+    response = client.post(
+        BOOTSTRAP_URL,
+        json=_payload(owner_password="short"),
+        headers={BOOTSTRAP_HEADER: TEST_SECRET},
+    )
+
+    assert response.status_code == 422
+
+
+def test_owner_email_invalid_format_is_422(client: TestClient, monkeypatch) -> None:
+    _with_secret(monkeypatch)
+
+    response = client.post(
+        BOOTSTRAP_URL,
+        json=_payload(owner_email="not-an-email"),
+        headers={BOOTSTRAP_HEADER: TEST_SECRET},
+    )
+
+    assert response.status_code == 422
+
+
 # -- replay / idempotency / atomicity ----------------------------------------
 
 
@@ -312,6 +459,8 @@ def test_repeated_bootstrap_does_not_create_another_tenant(
     assert db_session.query(Project).count() == 1
     assert db_session.query(APIKey).count() == 1
     assert db_session.query(ProvisioningBootstrap).count() == 1
+    assert db_session.query(User).count() == 1
+    assert db_session.query(OrganizationMembership).count() == 1
 
 
 def test_bootstrap_already_completed_response_is_generic(client: TestClient, monkeypatch) -> None:
@@ -349,6 +498,8 @@ def test_any_pre_existing_organization_blocks_bootstrap(
     assert db_session.query(Project).count() == 0
     assert db_session.query(APIKey).count() == 0
     assert db_session.query(ProvisioningBootstrap).count() == 0
+    assert db_session.query(User).count() == 0
+    assert db_session.query(OrganizationMembership).count() == 0
 
 
 def test_deleting_only_the_marker_row_does_not_re_enable_bootstrap(
@@ -369,19 +520,22 @@ def test_deleting_only_the_marker_row_does_not_re_enable_bootstrap(
     db_session.commit()
     assert deleted == 1
     assert db_session.query(ProvisioningBootstrap).count() == 0
-    # The organization/project/API key are untouched by that delete.
+    # The organization/project/API key/user are untouched by that delete.
     assert db_session.query(Organization).count() == 1
     assert db_session.query(Project).count() == 1
     assert db_session.query(APIKey).count() == 1
+    assert db_session.query(User).count() == 1
 
     second = client.post(BOOTSTRAP_URL, json=_payload(), headers={BOOTSTRAP_HEADER: TEST_SECRET})
 
     assert second.status_code == 409
-    # Still exactly one organization/project/API key -- the marker deletion
-    # did not create a window for a second tenant to be provisioned.
+    # Still exactly one organization/project/API key/user -- the marker
+    # deletion did not create a window for a second tenant to be
+    # provisioned.
     assert db_session.query(Organization).count() == 1
     assert db_session.query(Project).count() == 1
     assert db_session.query(APIKey).count() == 1
+    assert db_session.query(User).count() == 1
 
 
 def test_integrity_error_from_a_genuine_concurrent_identical_slug_race_leaves_no_partial_state(
@@ -415,6 +569,9 @@ def test_integrity_error_from_a_genuine_concurrent_identical_slug_race_leaves_no
                     project_name=f"Racing Project {i}",
                     project_slug=f"racing-project-{i}-{uuid.uuid4().hex[:8]}",
                     api_key_name="Bootstrap key",
+                    owner_email=f"racing-owner-{i}-{uuid.uuid4().hex[:8]}@example.com",
+                    owner_full_name=None,
+                    owner_password="correct horse battery staple",
                 )
             except IntegrityError:
                 session.rollback()
@@ -432,6 +589,8 @@ def test_integrity_error_from_a_genuine_concurrent_identical_slug_race_leaves_no
     assert db_session.query(Project).count() == 1
     assert db_session.query(APIKey).count() == 1
     assert db_session.query(ProvisioningBootstrap).count() == 1
+    assert db_session.query(User).count() == 1
+    assert db_session.query(OrganizationMembership).count() == 1
 
 
 def test_concurrent_bootstrap_requests_result_in_exactly_one_success(
@@ -457,6 +616,9 @@ def test_concurrent_bootstrap_requests_result_in_exactly_one_success(
                 project_name=f"Concurrent Project {i}",
                 project_slug=f"concurrent-project-{i}-{uuid.uuid4().hex[:8]}",
                 api_key_name="Bootstrap key",
+                owner_email=f"concurrent-owner-{i}-{uuid.uuid4().hex[:8]}@example.com",
+                owner_full_name=None,
+                owner_password="correct horse battery staple",
             )
         finally:
             session.close()
@@ -469,6 +631,8 @@ def test_concurrent_bootstrap_requests_result_in_exactly_one_success(
     assert len(successes) == 1
     assert db_session.query(Organization).count() == 1
     assert db_session.query(ProvisioningBootstrap).count() == 1
+    assert db_session.query(User).count() == 1
+    assert db_session.query(OrganizationMembership).count() == 1
 
 
 # -- rate limiting -------------------------------------------------------

@@ -122,6 +122,33 @@ class Settings(BaseSettings):
     bootstrap_rate_limit_refill_per_second: float = 0.05
     bootstrap_rate_limit_max_tracked_ips: int = 10_000
 
+    # Dashboard user authentication (Phase 4D, F1) -- POST /v1/auth/login,
+    # POST /v1/auth/logout, GET /v1/auth/session. See
+    # app/security/passwords.py / app/security/sessions.py /
+    # app/services/auth.py. Entirely separate from customer API-key
+    # authentication above.
+    #
+    # Session lifetime: a logged-in dashboard user must re-authenticate
+    # after this many hours regardless of activity (no sliding-expiration
+    # renewal in this phase -- kept simple; revisit if that proves
+    # annoying in practice). 12 hours is a reasonable single-workday
+    # session for a small self-hosted internal tool, not a load-tested
+    # production number.
+    dashboard_session_ttl_hours: int = 12
+
+    # In-process, IP-keyed rate limiting for POST /v1/auth/login -- same
+    # `RateLimiter` primitive as the bootstrap tier above, for the identical
+    # reason: a login attempt has no authenticated identity to key on until
+    # it succeeds, so it must be keyed by client IP instead. Deliberately
+    # more generous than the bootstrap tier (bootstrap is a once-ever
+    # operator action; login is routine, and a legitimate user mistyping
+    # their password a few times must not be locked out for minutes), but
+    # still strict enough to make online password brute-forcing impractical.
+    # A starting point, not a load-tested production number.
+    login_rate_limit_capacity: int = 10
+    login_rate_limit_refill_per_second: float = 0.1
+    login_rate_limit_max_tracked_ips: int = 10_000
+
     @property
     def cors_allowed_origins_list(self) -> list[str]:
         """Parsed, validated form of `cors_allowed_origins`.
