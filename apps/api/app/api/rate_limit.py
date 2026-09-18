@@ -142,6 +142,11 @@ _bootstrap_limiter: RateLimiter[str] = RateLimiter(
     refill_per_second=settings.bootstrap_rate_limit_refill_per_second,
     max_tracked_keys=settings.bootstrap_rate_limit_max_tracked_ips,
 )
+_login_limiter: RateLimiter[str] = RateLimiter(
+    capacity=settings.login_rate_limit_capacity,
+    refill_per_second=settings.login_rate_limit_refill_per_second,
+    max_tracked_keys=settings.login_rate_limit_max_tracked_ips,
+)
 
 
 def get_ingestion_rate_limiter() -> RateLimiter[uuid.UUID]:
@@ -154,6 +159,10 @@ def get_default_rate_limiter() -> RateLimiter[uuid.UUID]:
 
 def get_bootstrap_rate_limiter() -> RateLimiter[str]:
     return _bootstrap_limiter
+
+
+def get_login_rate_limiter() -> RateLimiter[str]:
+    return _login_limiter
 
 
 def _enforce(auth: AuthenticatedKey, limiter: RateLimiter[uuid.UUID]) -> AuthenticatedKey:
@@ -210,6 +219,28 @@ def require_bootstrap_rate_limit(
     setup leaves `request.client` unset, so this dependency itself never
     raises) rather than any authenticated identity, since there is none
     before bootstrap succeeds.
+    """
+    client_key = request.client.host if request.client is not None else "unknown"
+    retry_after_seconds = limiter.allow(client_key)
+    if retry_after_seconds is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Retry after {retry_after_seconds} seconds.",
+            headers={RETRY_AFTER_HEADER: str(retry_after_seconds)},
+        )
+
+
+def require_login_rate_limit(
+    request: Request,
+    limiter: RateLimiter[str] = Depends(get_login_rate_limiter),
+) -> None:
+    """Applied to `POST /v1/auth/login` -- same IP-keyed shape as
+    `require_bootstrap_rate_limit` above and for the identical reason (no
+    authenticated identity exists yet to key on). Deliberately a separate
+    limiter instance/tier from bootstrap's: login is a routine, repeatable
+    action for legitimate users, not a once-ever operator action, so it
+    needs its own, more generous budget -- see
+    `app.config.settings.login_rate_limit_*`.
     """
     client_key = request.client.host if request.client is not None else "unknown"
     retry_after_seconds = limiter.allow(client_key)

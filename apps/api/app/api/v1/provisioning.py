@@ -1,5 +1,6 @@
 """`POST /v1/provisioning/bootstrap` -- production provisioning/onboarding
-(Phase 4D, F3). Closes the production-readiness gap docs/decisions/
+(Phase 4D, F3; extended in Phase 4D F1 to also create the first dashboard
+user). Closes the production-readiness gap docs/decisions/
 006-deployment-architecture.md's "Known limitations" named: the only
 existing way to mint an organization/project/API key was
 `apps/api/scripts/seed_local_api_key.py`, a script requiring direct
@@ -7,10 +8,14 @@ database access, with no HTTP equivalent for a production deployment where
 an operator may not have (or want) a database shell open.
 
 **This is bootstrap provisioning for a single, trusted operator -- not a
-public signup system.** There is no user-facing authentication anywhere in
-this codebase (no passwords, no sessions, no OAuth), and this endpoint does
-not add one. It is protected by a dedicated, environment-configured secret
-(`app.api.deps.get_bootstrap_auth`, `X-Vigil-Bootstrap-Token` -- a wholly
+public signup system.** As of Phase 4D F1, dashboard user authentication
+does exist (`app.services.auth`, `app.api.v1.auth` -- email/password,
+scrypt-hashed, session-token-based, never JWT), and this endpoint is the
+*only* place a user can ever be created: there is no separate signup
+endpoint, and there never will be one that this endpoint's bootstrap-token
+protection doesn't also gate. It is protected by a dedicated,
+environment-configured secret (`app.api.deps.get_bootstrap_auth`,
+`X-Vigil-Bootstrap-Token` -- a wholly
 separate trust boundary from a customer's `Authorization: Bearer vgl_*`
 key, structurally identical to `app.api.deps.get_internal_service_auth`'s
 existing internal-worker-token pattern) that is empty/disabled by default,
@@ -56,7 +61,10 @@ router = APIRouter(tags=["provisioning"])
     response_model=BootstrapResponse,
     status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(require_bootstrap_rate_limit), Depends(get_bootstrap_auth)],
-    summary="One-time bootstrap: create the first organization, project, and API key",
+    summary=(
+        "One-time bootstrap: create the first organization, project, API key, "
+        "and dashboard owner user"
+    ),
     description=(
         "Requires `X-Vigil-Bootstrap-Token` to match the operator-configured "
         "VIGIL_API_BOOTSTRAP_SECRET -- disabled entirely (401 for every "
@@ -64,7 +72,9 @@ router = APIRouter(tags=["provisioning"])
         "Succeeds at most once per deployment: a second call, concurrent or "
         "later, always receives 409. The returned `api_key` is shown "
         "exactly once and cannot be retrieved again -- see the response "
-        "schema and apps/api/README.md's Provisioning section."
+        "schema and apps/api/README.md's Provisioning section. "
+        "`owner_password` is hashed before storage and is never returned or "
+        "logged; log into the dashboard afterward via `POST /v1/auth/login`."
     ),
     responses={
         401: {
@@ -74,7 +84,11 @@ router = APIRouter(tags=["provisioning"])
             )
         },
         409: {"description": "Bootstrap has already been completed for this deployment."},
-        422: {"description": "Invalid organization/project name or slug."},
+        422: {
+            "description": (
+                "Invalid organization/project name, slug, owner email, or owner password."
+            )
+        },
         429: {
             "description": "Rate limit exceeded for bootstrap attempts. See the Retry-After header."
         },
@@ -89,6 +103,9 @@ def bootstrap(payload: BootstrapRequest, db: Session = Depends(get_db)) -> Boots
             project_name=payload.project_name,
             project_slug=payload.project_slug,
             api_key_name=payload.api_key_name,
+            owner_email=payload.owner_email,
+            owner_full_name=payload.owner_full_name,
+            owner_password=payload.owner_password,
         )
     except IntegrityError as exc:
         # Should be rare now that app.services.provisioning.
@@ -96,22 +113,24 @@ def bootstrap(payload: BootstrapRequest, db: Session = Depends(get_db)) -> Boots
         # way to still reach a unique-constraint collision here is two
         # concurrent bootstrap requests that both passed that check (both
         # saw an empty `organizations` table) and both chose the identical
-        # organization_slug/project_slug -- never surfaced as a raw
-        # 500/driver exception regardless. db.rollback() is required before
-        # this Session can be used again: a failed flush leaves it unusable
-        # until then.
+        # organization_slug/project_slug/owner_email -- never surfaced as a
+        # raw 500/driver exception regardless. db.rollback() is required
+        # before this Session can be used again: a failed flush leaves it
+        # unusable until then.
         db.rollback()
         logger.warning(
-            "provisioning bootstrap failed: slug already in use",
+            "provisioning bootstrap failed: slug or email already in use",
             extra={
                 "organization_slug": payload.organization_slug,
                 "project_slug": payload.project_slug,
+                "owner_email": payload.owner_email,
             },
         )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "Unable to provision: an organization or project with this slug may already exist."
+                "Unable to provision: an organization, project, or user with these "
+                "identifiers may already exist."
             ),
         ) from exc
 
@@ -127,4 +146,6 @@ def bootstrap(payload: BootstrapRequest, db: Session = Depends(get_db)) -> Boots
         project_id=result.project_id,
         api_key_id=result.api_key_id,
         api_key=result.api_key,
+        user_id=result.user_id,
+        owner_email=result.owner_email,
     )

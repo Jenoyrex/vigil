@@ -33,8 +33,8 @@ _TestSessionLocal = sessionmaker(bind=_engine, autoflush=False, expire_on_commit
 
 _TABLES = (
     "evaluation_jobs, evaluator_configs, evaluation_poller_checkpoint, "
-    "provisioning_bootstrap, api_keys, organization_memberships, projects, "
-    "organizations, users"
+    "provisioning_bootstrap, api_keys, dashboard_sessions, organization_memberships, "
+    "projects, organizations, users"
 )
 
 
@@ -230,6 +230,39 @@ def active_api_key(db_session: Session) -> SimpleNamespace:
     raw_key, key_prefix, key_hash = generate_api_key()
     api_key = make_api_key(db_session, project, key_prefix=key_prefix, key_hash=key_hash)
     return SimpleNamespace(raw_key=raw_key, organization=org, project=project, api_key=api_key)
+
+
+@pytest.fixture
+def active_dashboard_user(db_session: Session) -> SimpleNamespace:
+    """An active, owner-role dashboard user for a fresh org/project, plus
+    the raw (unhashed) password `POST /v1/auth/login` tests authenticate
+    with. Mirrors `active_api_key` above, for dashboard-user auth instead
+    of customer-API-key auth -- the two are deliberately independent
+    fixtures, matching the two independent authentication paths."""
+    from app.db.models import OrganizationMembership
+    from app.security.passwords import hash_password
+    from test_models import make_organization, make_project, make_user
+
+    org = make_organization(db_session)
+    project = make_project(db_session, org)
+    raw_password = "correct horse battery staple"
+    user = make_user(
+        db_session,
+        email=f"owner-{org.id}@example.com",
+        hashed_password=hash_password(raw_password),
+        is_active=True,
+    )
+    membership = OrganizationMembership(user_id=user.id, organization_id=org.id, role="owner")
+    db_session.add(membership)
+    db_session.commit()
+
+    return SimpleNamespace(
+        user=user,
+        raw_password=raw_password,
+        organization=org,
+        project=project,
+        membership=membership,
+    )
 
 
 class FakeChResult:

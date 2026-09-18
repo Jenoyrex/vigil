@@ -349,12 +349,13 @@ See `docs/decisions/007-cors-and-dashboard-security-headers.md` for the full rat
 
 ## Provisioning
 
-`POST /v1/provisioning/bootstrap` (Phase 4D, F3) is the production, HTTP-based equivalent of
-`scripts/seed_local_api_key.py`: a one-time way to create the first organization, project, and
-API key in a deployment where an operator may not have (or want) direct database access. It is
-**bootstrap provisioning for a single trusted operator, not a public signup system** — there is
-no user-facing authentication anywhere in this codebase (no passwords, sessions, or OAuth), and
-this endpoint does not add one.
+`POST /v1/provisioning/bootstrap` (Phase 4D, F3; extended in Phase 4D F1) is the production,
+HTTP-based equivalent of `scripts/seed_local_api_key.py`: a one-time way to create the first
+organization, project, API key, and dashboard owner user in a deployment where an operator may
+not have (or want) direct database access. It is **bootstrap provisioning for a single trusted
+operator, not a public signup system** — this is the *only* place a dashboard user can ever be
+created; there is no separate signup endpoint, and dashboard login itself
+(`POST /v1/auth/login`, see "Dashboard authentication" below) never creates one either.
 
 ### Enabling it
 
@@ -394,14 +395,21 @@ curl -X POST http://127.0.0.1:8000/v1/provisioning/bootstrap \
     "organization_slug": "acme-corp",
     "project_name": "Production",
     "project_slug": "production",
-    "api_key_name": "Production key"
+    "api_key_name": "Production key",
+    "owner_email": "you@acme.example",
+    "owner_full_name": "Ada Lovelace",
+    "owner_password": "<a real password, at least 12 characters>"
   }'
 ```
 
-On success (`201`), the response contains `organization_id`, `project_id`, `api_key_id`, and
-`api_key` — the plaintext key, **shown exactly once and never retrievable again** (only its
-SHA-256 hash is ever persisted, identically to `scripts/seed_local_api_key.py`'s own key
-issuance). Copy it immediately.
+On success (`201`), the response contains `organization_id`, `project_id`, `api_key_id`,
+`api_key`, `user_id`, and `owner_email`. `api_key` is the plaintext key, **shown exactly once and
+never retrievable again** (only its SHA-256 hash is ever persisted, identically to
+`scripts/seed_local_api_key.py`'s own key issuance) — copy it immediately.
+`owner_password` is **not** included anywhere in the response (you already know it, having just
+chosen it) — only its `scrypt` hash is persisted, on the new `users` row. Log into the dashboard
+with `owner_email`/`owner_password` via its `/login` page (`POST /v1/auth/login` underneath) —
+see "Dashboard authentication" below.
 
 ### Repeated calls
 
@@ -420,22 +428,28 @@ would still refuse (layer (1) above still sees the organization). Re-enabling bo
 a full, destructive teardown of everything the original run created:
 
 ```sql
--- 1. Find the organization bootstrap created.
+-- 1. Find the organization bootstrap created, and its owner user.
 SELECT organization_id FROM provisioning_bootstrap WHERE id = 'bootstrap';
+SELECT user_id FROM organization_memberships WHERE organization_id = '<org-id>';
 
--- 2. Substitute that UUID for <org-id> below and run as ONE transaction, in
---    exactly this order (api_keys/projects reference organizations with
---    ondelete=RESTRICT, so this order is required, not just convention).
+-- 2. Substitute those UUIDs for <org-id>/<user-id> below and run as ONE
+--    transaction, in exactly this order (api_keys/projects reference
+--    organizations with ondelete=RESTRICT, so this order is required, not
+--    just convention).
 --
 --    DESTRUCTIVE. Irrecoverably deletes the organization, its project(s),
---    and its API key(s). This is an operator-level, disposable
+--    its API key(s), its owner user, and that user's dashboard
+--    sessions/memberships. This is an operator-level, disposable
 --    development/staging procedure -- NEVER run this against a production
 --    deployment holding real data, and never expose it through any API.
 BEGIN;
 DELETE FROM api_keys WHERE project_id IN (SELECT id FROM projects WHERE organization_id = '<org-id>');
 DELETE FROM projects WHERE organization_id = '<org-id>';
 DELETE FROM provisioning_bootstrap WHERE id = 'bootstrap';
+DELETE FROM organization_memberships WHERE organization_id = '<org-id>';
 DELETE FROM organizations WHERE id = '<org-id>';
+DELETE FROM dashboard_sessions WHERE user_id = '<user-id>';
+DELETE FROM users WHERE id = '<user-id>';
 COMMIT;
 ```
 
@@ -466,10 +480,46 @@ This is a minimal bootstrap mechanism, not a complete provisioning/identity syst
   `hmac.compare_digest`), not per-operator credentials — anyone with the secret can bootstrap.
 - It rate-limits by client IP (`VIGIL_API_BOOTSTRAP_RATE_LIMIT_*`, in-process, no Redis) to slow
   brute-forcing the secret, not to prevent it outright — use a real, high-entropy secret.
-- It creates no `users`/`organization_memberships` rows — this system has no user-facing
-  authentication to attach one to yet (see `app/services/provisioning.py`'s module docstring).
+- It creates exactly one dashboard user, as the organization's `owner` — there is no invite/signup
+  flow to add a second one yet; see "Dashboard authentication" below for what login itself
+  supports today.
 - It never accepts a customer `vgl_*` API key as authorization, and a customer key can never
   provision additional organizations/projects/keys through it.
+
+## Dashboard authentication
+
+`POST /v1/auth/login`, `POST /v1/auth/logout`, and `GET /v1/auth/session` (Phase 4D, F1)
+authenticate a human logging into `apps/dashboard`, entirely separate from customer API-key
+authentication above — a `vgl_*` key satisfies neither of these endpoints, and login credentials
+satisfy neither of the `vgl_*`-key-protected endpoints. There is no signup endpoint; the only user
+ever created is bootstrap's owner user (see "Provisioning" above).
+
+- **`POST /v1/auth/login`** — `{"email": ..., "password": ...}`. On success (`200`), returns
+  `{"session_token": ..., "expires_at": ...}` — the raw session token, shown exactly once (only
+  its SHA-256 hash is persisted, on `dashboard_sessions`). On any failure — unknown email, wrong
+  password, an inactive account, or a user with no organization membership — returns the
+  identical generic `401 {"detail": "Invalid email or password."}`, deliberately never revealing
+  which. Rate-limited by client IP (`VIGIL_API_LOGIN_RATE_LIMIT_*`, in-process, no Redis — the
+  same `RateLimiter` primitive bootstrap uses, a separate, more generous tier).
+- **`GET /v1/auth/session`** — presents the raw token via the `X-Vigil-Session-Token` header
+  (never `Authorization: Bearer`, never a query parameter). Returns `200` with the session's
+  owning user if the token is valid, unexpired, unrevoked, and its user is still active; a
+  generic `401 {"detail": "Invalid or expired session."}` otherwise. `apps/dashboard`'s own proxy
+  calls this on every request to a gated route — there is no caching layer in front of it on
+  either side, so a revoked session is rejected on its very next request.
+- **`POST /v1/auth/logout`** — same `X-Vigil-Session-Token` header. Revokes the matching session
+  (sets `revoked_at`) and always returns `204`, even for a missing/unknown/already-revoked token
+  — idempotent by design, so a client never needs special handling for "log out when maybe
+  already logged out."
+
+Session lifetime defaults to 12 hours (`VIGIL_API_DASHBOARD_SESSION_TTL_HOURS`), with no sliding
+renewal in this phase — a session simply expires at `expires_at` regardless of activity, and the
+dashboard redirects to `/login` again.
+
+Password hashing uses `hashlib.scrypt` (Python stdlib, RFC 7914's interactive-login parameters)
+— never the fast SHA-256 this codebase uses for API keys/session tokens, which are
+server-generated high-entropy secrets, not human-chosen ones. See
+`app/security/passwords.py`/`app/security/sessions.py`.
 
 ## Logging
 

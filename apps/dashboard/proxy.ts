@@ -4,6 +4,7 @@ import type { NextRequest } from "next/server";
 import { getTrace } from "@/lib/api/traces";
 import { deriveStartDate } from "@/lib/traceStartDate";
 import { VigilApiError } from "@/lib/api/types";
+import { SESSION_COOKIE_NAME, validateSession } from "@/lib/api/dashboardAuth";
 
 // Mirrors the CSP this app has always sent (see
 // docs/decisions/007-cors-and-dashboard-security-headers.md) with one
@@ -38,6 +39,34 @@ function buildContentSecurityPolicy(nonce: string): string {
   ].join("; ");
 }
 
+const LOGIN_PATH = "/login";
+
+/**
+ * Reachable without a valid dashboard session (Phase 4D, F1): `/login`
+ * itself, and this app's own `/api/auth/**` routes (login/logout), which
+ * obviously cannot themselves require the session they establish or tear
+ * down. Every other path -- every page, and every `/api/vigil/**` BFF
+ * route -- requires one; see the session gate in `proxy()` below.
+ */
+function isPublicPath(pathname: string): boolean {
+  return pathname === LOGIN_PATH || pathname.startsWith("/api/auth/");
+}
+
+/**
+ * Session gate (Phase 4D, F1). Calls apps/api's `GET /v1/auth/session` on
+ * every gated request -- no caching layer on either side, matching that
+ * endpoint's own design (see app/api/v1/auth.py's module docstring), so a
+ * revoked or expired session is rejected on its very next request here
+ * too, not just at the API. The cookie itself is HttpOnly (see
+ * lib/api/dashboardAuth.ts's `sessionCookieOptions`), so this is also the
+ * only place that ever reads its value.
+ */
+async function hasValidSession(request: NextRequest): Promise<boolean> {
+  const token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+  if (!token) return false;
+  return (await validateSession(token)) !== null;
+}
+
 /**
  * Pre-render existence check for the trace-detail page, plus this app's CSP
  * nonce generation (see `buildContentSecurityPolicy` above).
@@ -60,6 +89,39 @@ function buildContentSecurityPolicy(nonce: string): string {
  * through unchanged to the existing page, which already handles it.
  */
 export async function proxy(request: NextRequest) {
+  const pathname = request.nextUrl.pathname;
+  const isApiRoute = pathname.startsWith("/api/");
+
+  if (!isPublicPath(pathname) && !(await hasValidSession(request))) {
+    if (isApiRoute) {
+      return NextResponse.json({ detail: "Invalid or expired session." }, { status: 401 });
+    }
+    const loginUrl = new URL(LOGIN_PATH, request.url);
+    // pathname + search (never request.nextUrl.href or .toString()) -- only
+    // the same-origin path-and-query ever goes into `next`, so there is
+    // nothing here for app/login/page.tsx's sanitizeNextPath to see other
+    // than a same-origin relative reference, regardless of what this
+    // request's own URL looked like.
+    loginUrl.searchParams.set("next", pathname + request.nextUrl.search);
+    return NextResponse.redirect(loginUrl);
+  }
+
+  // CSP nonce generation and the trace-detail 404 rewrite below only apply
+  // to HTML page routes -- `/api/**` responses are JSON, never rendered,
+  // and never need either.
+  if (isApiRoute) {
+    return NextResponse.next();
+  }
+
+  // A client-side router prefetch (`next-router-prefetch`/`purpose:
+  // prefetch`) never runs scripts or needs the 404 rewrite, so both are
+  // skipped for one as a performance optimization only -- unlike the old
+  // matcher-level `missing` filter this replaces, the session gate above
+  // already ran unconditionally before this point, since both headers are
+  // attacker-controlled and must never be able to skip authentication.
+  const isPrefetch =
+    request.headers.has("next-router-prefetch") || request.headers.get("purpose") === "prefetch";
+
   // A nonce only has security value if it's unpredictable and used exactly
   // once, so it's generated fresh on every invocation of this function --
   // never hoisted to module scope, where it would be reused across every
@@ -70,7 +132,7 @@ export async function proxy(request: NextRequest) {
   // outside the developer's own machine ever reaches.
   let init: { request: { headers: Headers } } | undefined;
   let nonce: string | undefined;
-  if (process.env.NODE_ENV === "production") {
+  if (process.env.NODE_ENV === "production" && !isPrefetch) {
     nonce = Buffer.from(crypto.randomUUID()).toString("base64");
     const requestHeaders = new Headers(request.headers);
     requestHeaders.set("x-nonce", nonce);
@@ -78,7 +140,7 @@ export async function proxy(request: NextRequest) {
     init = { request: { headers: requestHeaders } };
   }
 
-  const match = /^\/traces\/([^/]+)$/.exec(request.nextUrl.pathname);
+  const match = isPrefetch ? null : /^\/traces\/([^/]+)$/.exec(pathname);
   let response: NextResponse;
 
   if (!match) {
@@ -114,16 +176,20 @@ export async function proxy(request: NextRequest) {
 }
 
 export const config = {
+  // Deliberately no `missing`/`has` filter on router-prefetch or `purpose:
+  // prefetch` headers here (unlike before Phase 4D F1): both are ordinary,
+  // attacker-settable request headers, and this matcher now also gates
+  // whether the session check runs at all -- filtering proxy invocation on
+  // either would let a crafted request skip authentication entirely by
+  // simply presenting one. `isPrefetch` inside `proxy()` still skips the
+  // (non-security) CSP-nonce/trace-check work for a genuine prefetch, using
+  // the same signal safely, since skipping optional work is not a security
+  // decision the way skipping the auth check would be.
   matcher: [
-    {
-      // Same page routes this app has always sent security headers to,
-      // minus the ones that never need a CSP: API responses aren't HTML,
-      // and static/image assets and prefetch requests don't run scripts.
-      source: "/((?!api|_next/static|_next/image|favicon.ico).*)",
-      missing: [
-        { type: "header", key: "next-router-prefetch" },
-        { type: "header", key: "purpose", value: "prefetch" },
-      ],
-    },
+    // Every page route (minus static/image assets, which never need a
+    // session or a CSP) and every `/api/**` route (this app's `/api/vigil/**`
+    // BFF proxy and `/api/auth/**` login/logout) -- `/api/auth/**` and
+    // `/login` are carved back out as public paths inside `proxy()` itself.
+    "/((?!_next/static|_next/image|favicon.ico).*)",
   ],
 };
