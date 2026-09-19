@@ -9,17 +9,52 @@ read endpoints").
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
 
 from app.db.models.evaluation_job import EVALUATION_JOB_STATUSES
 from app.schemas.query import SpanId, TraceId
 
 EvaluationJobCreateReason = Literal["created", "already_exists", "not_enabled", "not_sampled"]
 EvaluationJobStatus = Literal[EVALUATION_JOB_STATUSES]  # type: ignore[valid-type]
+
+# `evaluator_name` validation (Phase 4A) -- customer-facing only. Bounds
+# length and character set; deliberately does NOT enumerate specific known
+# names (`"relevance"`, `"relevance_embedding"`, or anything else) -- ADR
+# 005 section 2's open-string, no-catalog design (matching `span_type`'s own
+# precedent) is unchanged: any string matching this pattern is still
+# accepted, known or not, so a new evaluator shipped in services/evaluator
+# never requires an apps/api change to become configurable. This closes the
+# gap `app/db/models/evaluation_job.py`'s own docstring already named
+# ("format validation belongs to the API schema layer... Phase 4+") --
+# before this, an unbounded string reached the `evaluator_configs` table's
+# `uq_evaluator_configs_project_id_evaluator_name` unique index directly,
+# risking an ugly, unhandled 500 (e.g. a Postgres "index row size exceeds
+# maximum" error) instead of a clean 422.
+#
+# Deliberately NOT applied to `EvaluationJobCreateRequest.evaluator_name`
+# below: that value is supplied by the trusted, internal-token-authenticated
+# worker (never customer input), and is already constrained in practice to
+# whatever `worker.registry.EvaluatorRegistry.registered_keys()` defines --
+# a different trust boundary with a different (and already-adequate)
+# validation story.
+EVALUATOR_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+
+
+def _validate_evaluator_name(value: str) -> str:
+    if not EVALUATOR_NAME_RE.fullmatch(value):
+        raise ValueError(
+            "evaluator_name must be 1-128 characters, using only letters, "
+            "digits, underscore, hyphen, or period."
+        )
+    return value
+
+
+EvaluatorName = Annotated[str, AfterValidator(_validate_evaluator_name)]
 
 
 class EvaluationJobCreateRequest(BaseModel):

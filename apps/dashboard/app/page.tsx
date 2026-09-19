@@ -7,6 +7,8 @@ import { listTraces } from "@/lib/api/traces";
 import { VigilApiError, type LlmUsageResponse, type SpanAnalyticsResponse, type TraceListResponse } from "@/lib/api/types";
 import { bucketForPreset, DEFAULT_TIME_RANGE_PRESET, resolveTimeRange } from "@/lib/time-range";
 
+export const dynamic = "force-dynamic";
+
 interface FetchError {
   status: number;
   message: string;

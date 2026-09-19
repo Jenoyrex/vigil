@@ -2,26 +2,30 @@
 
 Route responsibilities are deliberately layered and kept thin here:
 
-    authentication (app.api.deps)
+    authentication (app.api.deps) -> rate limiting (app.api.rate_limit,
+        Phase 4C -- the stricter ingestion tier for this endpoint
+        specifically, the shared default tier for every other route below)
         -> validation (app.schemas.traces, via FastAPI's request body)
         -> transformation (app.services.ingestion)
         -> repository (app.clickhouse.repository)
         -> ClickHouse
 
-This module only wires those together, generates a request id for log
-correlation, and maps repository failures to HTTP responses. It does not
-contain ClickHouse queries, hashing logic, or payload-limit math itself.
+This module only wires those together, reuses the per-request id
+`app.middleware.RequestIdMiddleware` already bound for structured-log
+correlation (Phase 4D, F4 -- see app/logging_config.py), and maps
+repository failures to HTTP responses. It does not contain ClickHouse
+queries, hashing logic, or payload-limit math itself.
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from app.api.deps import AuthenticatedKey, get_current_api_key
+from app.api.deps import AuthenticatedKey
+from app.api.rate_limit import require_default_rate_limit, require_ingestion_rate_limit
 from app.clickhouse.client import get_clickhouse_client
 from app.clickhouse.query_common import ClickHouseQueryError
 from app.clickhouse.query_repository import TracesQueryRepository
@@ -31,6 +35,7 @@ from app.clickhouse.repository import (
     SpansRepository,
 )
 from app.config import settings
+from app.logging_config import get_request_id
 from app.schemas.query import (
     AwareDatetime,
     SpanId,
@@ -79,6 +84,7 @@ def get_traces_query_repository() -> TracesQueryRepository:
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         413: {"description": "Request body exceeds the maximum allowed size."},
         422: {
             "description": (
@@ -91,32 +97,43 @@ def get_traces_query_repository() -> TracesQueryRepository:
 )
 def ingest_traces(
     payload: TracesRequest,
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_ingestion_rate_limit),
     repository: SpansRepository = Depends(get_spans_repository),
 ) -> TracesIngestResponse:
-    request_id = str(uuid.uuid4())
+    # Reuses app.middleware.RequestIdMiddleware's per-request id (the same
+    # value already bound into every structured log line for this request,
+    # and returned as the X-Request-Id response header) rather than minting
+    # a second, separate one -- see app/logging_config.py.
+    request_id = get_request_id()
     rows = transform_request(payload, project_id=auth.project_id)
 
     try:
         repository.insert_spans(rows)
     except ClickHouseUnavailableError as exc:
-        logger.error("clickhouse unavailable request_id=%s error=%s", request_id, exc)
+        logger.error(
+            "ClickHouse unavailable during span insert",
+            extra={"project_id": str(auth.project_id), "error": str(exc)},
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage is temporarily unavailable. Please retry.",
         ) from exc
     except ClickHouseInsertError as exc:
-        logger.error("clickhouse insert failed request_id=%s error=%s", request_id, exc)
+        logger.error(
+            "ClickHouse rejected span insert",
+            extra={"project_id": str(auth.project_id), "error": str(exc)},
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to store telemetry.",
         ) from exc
 
+    # NEVER log span content here -- `rows` carries the ingested spans'
+    # input/output/attributes; only their count is a safe operational
+    # metric. See app/logging_config.py's module docstring.
     logger.info(
-        "ingested spans request_id=%s project_id=%s span_count=%d",
-        request_id,
-        auth.project_id,
-        len(rows),
+        "ingested spans",
+        extra={"project_id": str(auth.project_id), "span_count": len(rows)},
     )
     return TracesIngestResponse(accepted=len(rows), request_id=request_id)
 
@@ -138,6 +155,7 @@ def ingest_traces(
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         422: {"description": "Invalid time range, cursor, or query parameters."},
         503: {"description": "ClickHouse is temporarily unavailable; safe to retry."},
     },
@@ -158,7 +176,7 @@ def list_traces_endpoint(
     cursor: str | None = Query(
         default=None, description="Opaque next_cursor from a prior response."
     ),
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     repository: TracesQueryRepository = Depends(get_traces_query_repository),
 ) -> TraceListResponse:
     try:
@@ -180,13 +198,19 @@ def list_traces_endpoint(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     except ClickHouseUnavailableError as exc:
-        logger.error("clickhouse unavailable during trace list: %s", exc)
+        logger.error(
+            "ClickHouse unavailable during trace list",
+            extra={"project_id": str(auth.project_id), "error": str(exc)},
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage is temporarily unavailable. Please retry.",
         ) from exc
     except ClickHouseQueryError as exc:
-        logger.error("clickhouse query failed during trace list: %s", exc)
+        logger.error(
+            "ClickHouse query failed during trace list",
+            extra={"project_id": str(auth.project_id), "error": str(exc)},
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to query telemetry."
         ) from exc
@@ -208,6 +232,7 @@ def list_traces_endpoint(
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         404: {"description": "No spans found for this trace_id in the authenticated project."},
         422: {"description": "Malformed trace_id or start_date."},
         503: {"description": "ClickHouse is temporarily unavailable; safe to retry."},
@@ -223,7 +248,7 @@ def get_trace_endpoint(
             "scanning every retained day."
         ),
     ),
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     repository: TracesQueryRepository = Depends(get_traces_query_repository),
 ) -> TraceDetailResponse:
     try:
@@ -235,13 +260,19 @@ def get_trace_endpoint(
             max_spans=settings.max_spans_per_trace_response,
         )
     except ClickHouseUnavailableError as exc:
-        logger.error("clickhouse unavailable during trace detail: %s", exc)
+        logger.error(
+            "ClickHouse unavailable during trace detail",
+            extra={"project_id": str(auth.project_id), "trace_id": trace_id, "error": str(exc)},
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage is temporarily unavailable. Please retry.",
         ) from exc
     except ClickHouseQueryError as exc:
-        logger.error("clickhouse query failed during trace detail: %s", exc)
+        logger.error(
+            "ClickHouse query failed during trace detail",
+            extra={"project_id": str(auth.project_id), "trace_id": trace_id, "error": str(exc)},
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to query telemetry."
         ) from exc
@@ -263,6 +294,7 @@ def get_trace_endpoint(
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         404: {
             "description": "No span found for this trace_id/span_id in the authenticated project."
         },
@@ -274,7 +306,7 @@ def get_span_endpoint(
     trace_id: TraceId,
     span_id: SpanId,
     start_date: date | None = Query(default=None),
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     repository: TracesQueryRepository = Depends(get_traces_query_repository),
 ) -> SpanOut:
     try:
@@ -286,13 +318,29 @@ def get_span_endpoint(
             start_date=start_date,
         )
     except ClickHouseUnavailableError as exc:
-        logger.error("clickhouse unavailable during span detail: %s", exc)
+        logger.error(
+            "ClickHouse unavailable during span detail",
+            extra={
+                "project_id": str(auth.project_id),
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage is temporarily unavailable. Please retry.",
         ) from exc
     except ClickHouseQueryError as exc:
-        logger.error("clickhouse query failed during span detail: %s", exc)
+        logger.error(
+            "ClickHouse query failed during span detail",
+            extra={
+                "project_id": str(auth.project_id),
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to query telemetry."
         ) from exc

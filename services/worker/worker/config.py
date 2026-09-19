@@ -4,18 +4,44 @@ section 12), scoped for now to what has actually been built: ClickHouse
 `evaluation_results` storage, PostgreSQL `evaluation_jobs` lifecycle/
 claiming, `worker.dispatcher.Dispatcher`'s bounded concurrency,
 `worker.failure_handling`'s retry/backoff, `worker.reaper`'s stuck-job
-reclaim, and `worker.runtime.WorkerRuntime`'s claim/dispatch/reap loop.
-`evaluator_call_timeout_seconds` (a per-call evaluator timeout) remains
-unimplemented anywhere in this codebase -- a future phase, not this one; see
-`worker/runtime.py`'s module docstring for the known limitation that leaves
-open.
+reclaim, `worker.runtime.WorkerRuntime`'s claim/dispatch/reap loop, and
+(Phase 4A) `worker.timeouts`'s per-call evaluator timeout enforcement plus
+the bounded-orphan-count self-restart it feeds into `worker/runtime.py`.
+`evaluator_call_timeout_seconds` and `evaluator_init_timeout_seconds` are
+two deliberately separate settings -- see `worker/registry.py`'s module
+docstring for why steady-state `evaluate()` latency and first-use
+model-construction latency must never share one timeout.
 """
 
+import logging
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="VIGIL_WORKER_", env_file=".env")
+
+    # Structured logging (Phase 4D, F4, worker/logging_config.py). Standard
+    # Python logging level name -- validated below so a typo fails loudly at
+    # process start rather than silently falling back to WARNING, which
+    # `logging.Logger.setLevel` would otherwise do for an unrecognized
+    # string. Shared by both `worker` and `poller` (one Settings class, per
+    # this file's own module docstring), each passing its own `service`
+    # name to `configure_logging` separately.
+    log_level: str = "INFO"
+
+    @field_validator("log_level")
+    @classmethod
+    def _validate_log_level(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        valid_levels = logging.getLevelNamesMapping()
+        if normalized not in valid_levels:
+            raise ValueError(
+                f"VIGIL_WORKER_LOG_LEVEL={value!r} is not a valid logging level "
+                f"(expected one of {sorted(valid_levels)})."
+            )
+        return normalized
 
     # ClickHouse connection. Defaults match infrastructure/.env.example /
     # infrastructure/docker-compose.yml local development credentials --
@@ -34,12 +60,83 @@ class Settings(BaseSettings):
     # local database by default.
     database_url: str = "postgresql://vigil:vigil@localhost:5434/vigil"
 
+    # PostgreSQL I/O bound (Phase 4D, worker/postgres/client.py) -- the same
+    # role clickhouse_timeout_seconds above already plays for ClickHouse,
+    # closing the one-sided gap worker/execution.py's own docstring has
+    # documented since Phase 4A: bounds both connection establishment
+    # (libpq's connect_timeout) and server-side statement execution
+    # (PostgreSQL's own statement_timeout, set via the connection's
+    # `options`), so a stuck claim/reap/completion call can no longer block
+    # a worker thread -- including this process's own main thread inside
+    # `WorkerRuntime.run()` -- indefinitely.
+    database_timeout_seconds: float = 10.0
+
     # Bounded-concurrency dispatch (worker/dispatcher.py). Deliberately
     # small by default, not unbounded -- ADR 005 section 12's "a project
     # operator... should not silently get full-volume evaluation" posture,
     # applied here to worker-process resource usage rather than per-project
     # sampling. Must be >= 1; Dispatcher itself also enforces this.
     max_concurrent_evaluations: int = 4
+
+    # Per-call evaluator timeout (Phase 4A, worker/timeouts.py,
+    # worker/execution.py). Bounds one `evaluate()` call -- both registered
+    # evaluators are documented sub-second once loaded, so this is generous
+    # relative to any genuine call, while still catching a hang far sooner
+    # than stuck_job_threshold_seconds below ever could. This is a
+    # best-effort timeout, not forced cancellation: Python cannot forcibly
+    # stop a running thread, so a call that exceeds this is abandoned, not
+    # killed -- see worker/timeouts.py's module docstring for exactly what
+    # that does and does not guarantee, and max_orphaned_evaluator_threads
+    # below for how the resulting resource usage is bounded rather than
+    # left unbounded.
+    evaluator_call_timeout_seconds: float = 30.0
+
+    # First-use evaluator construction timeout (Phase 4A, worker/registry.py).
+    # Deliberately separate from, and more generous than,
+    # evaluator_call_timeout_seconds above: constructing
+    # EmbeddingRelevanceEvaluator can mean a one-time, cold-cache network
+    # download of its ONNX model (~67MB from Hugging Face) on whichever
+    # worker process/thread first calls `.get()` for it, a categorically
+    # different, one-time cost that must never be judged against the tight
+    # per-call inference timeout.
+    evaluator_init_timeout_seconds: float = 90.0
+
+    # Bounded-orphan self-restart (Phase 4A, worker/timeouts.py,
+    # worker/runtime.py). A timed-out call (either kind above) is
+    # abandoned, not stopped -- its thread may keep running, unsupervised,
+    # for however long it takes to finish on its own or the process exits.
+    # This is NOT true forced cancellation and does NOT eliminate the
+    # resulting resource usage; it bounds the *worst case* instead: once
+    # this many such abandoned calls are simultaneously still outstanding
+    # in this process, worker.runtime.WorkerRuntime requests its own
+    # graceful shutdown (reusing the exact same request_stop() a SIGTERM
+    # already triggers) rather than letting the count grow without limit.
+    # Recovery after that depends entirely on an external process
+    # supervisor (systemd/Docker/Kubernetes restart policy) bringing up a
+    # fresh, zero-orphan replacement -- this setting only ever decides when
+    # to retire this process, never how it comes back. Defaults to the same
+    # value as max_concurrent_evaluations: losing that many concurrency
+    # slots to permanently-stuck calls is, in effect, having lost this
+    # process's entire intended throughput budget to leaks.
+    max_orphaned_evaluator_threads: int = 4
+
+    # Liveness heartbeat staleness bound (Phase 4D, F6, worker/heartbeat.py)
+    # -- read directly from the environment by
+    # services/worker/Dockerfile's HEALTHCHECK command (a separate,
+    # minimal subprocess that does not import this Settings class), not by
+    # any application code path; declared here anyway so it is documented
+    # and validated the same way every other tunable in this file is.
+    # Shared by both `worker` and `poller` (one image, one HEALTHCHECK
+    # instruction -- see that Dockerfile), so it must be generous enough
+    # for whichever of the two has the larger worst-case single-iteration
+    # time: the runtime's worst case is bounded by
+    # evaluator_init_timeout_seconds (90s default, only on a cold-cache
+    # first evaluation) plus database_timeout_seconds; the poller's is
+    # bounded by poller_interval_seconds (30s default) plus its own
+    # ClickHouse/HTTP timeouts. 180s comfortably covers both at their
+    # documented defaults; raise this if either of those settings is
+    # configured materially higher than its default.
+    heartbeat_stale_seconds: float = 180.0
 
     # Retry/backoff (worker/failure_handling.py), per
     # docs/decisions/005-evaluation-job-storage-worker.md's Phase 3E
@@ -54,13 +151,18 @@ class Settings(BaseSettings):
     # Stuck-job reaper (worker/reaper.py), per docs/decisions/005-evaluation-
     # job-storage-worker.md's Phase 3F amendment. stuck_job_threshold_seconds
     # must be meaningfully larger than however long a genuine, alive
-    # evaluation can take, so the reaper only catches real process death,
-    # never a call that's merely slow -- no per-call evaluator timeout is
-    # enforced yet (see this module's own docstring), so this default is
-    # deliberately conservative until one exists. reaper_batch_size mirrors
-    # claim_jobs' own batch_size argument, given a config default here since,
-    # unlike claim_jobs' worker-loop caller, the reaper has no other natural
-    # source for it.
+    # evaluation can take, so the reaper only catches real process death
+    # (a crashed/killed worker), never a call that's merely slow. This
+    # remains deliberately conservative even now that a per-call evaluator
+    # timeout exists (evaluator_call_timeout_seconds below): the two are
+    # complementary, not redundant -- that timeout bounds one thread's own
+    # wait for one call and lets the worker process keep making progress on
+    # other jobs; this threshold is the backstop for the case that timeout
+    # cannot address at all, a worker process that has died outright and can
+    # never itself decide anything. reaper_batch_size mirrors claim_jobs'
+    # own batch_size argument, given a config default here since, unlike
+    # claim_jobs' worker-loop caller, the reaper has no other natural source
+    # for it.
     stuck_job_threshold_seconds: float = 900.0
     reaper_batch_size: int = 100
 

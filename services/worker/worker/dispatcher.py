@@ -54,7 +54,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from worker.execution import EvaluationOutcome, execute_job
+from worker.execution import DEFAULT_EVALUATOR_CALL_TIMEOUT_SECONDS, EvaluationOutcome, execute_job
 from worker.failure_handling import FailureHandlingOutcome, handle_execution_failure
 from worker.postgres.repository import ClaimedJob, EvaluationJobsRepository
 from worker.registry import EvaluatorRegistry
@@ -93,11 +93,21 @@ class DispatchOutcome:
 
 class Dispatcher:
     """Constructed once with `max_concurrent_evaluations`, a shared
-    `EvaluatorRegistry`, and a `resource_provider`; `dispatch(jobs)` may be
-    called repeatedly (e.g. once per claimed batch, by a not-yet-built
-    poller/main loop) and always reuses the same registry across every call
-    and every job, while resolving a fresh per-task resource bundle for
-    each one (see module docstring).
+    `EvaluatorRegistry`, a `resource_provider`, and `evaluator_call_timeout_
+    seconds`; `dispatch(jobs)` may be called repeatedly (e.g. once per
+    claimed batch, by `worker.runtime.WorkerRuntime`) and always reuses the
+    same registry across every call and every job, while resolving a fresh
+    per-task resource bundle for each one (see module docstring).
+
+    `evaluator_call_timeout_seconds` is passed straight through to every
+    `execute_job` call unchanged (Phase 4A) -- this class makes no timeout
+    decision itself and does not need to change `dispatch()`'s own
+    `ThreadPoolExecutor` usage to benefit from it: because `execute_job`
+    now always returns within that timeout on its own (see
+    `worker/execution.py` and `worker/timeouts.py`), the existing
+    `future.result()` (still with no timeout of its own) and the `with
+    ThreadPoolExecutor(...)` block below are no longer at risk of blocking
+    on a single hung `evaluate()` call.
     """
 
     def __init__(
@@ -106,6 +116,7 @@ class Dispatcher:
         max_concurrent_evaluations: int,
         registry: EvaluatorRegistry,
         resource_provider: ResourceProvider,
+        evaluator_call_timeout_seconds: float = DEFAULT_EVALUATOR_CALL_TIMEOUT_SECONDS,
     ) -> None:
         if max_concurrent_evaluations < 1:
             raise ValueError(
@@ -114,6 +125,7 @@ class Dispatcher:
         self._max_concurrent_evaluations = max_concurrent_evaluations
         self._registry = registry
         self._resource_provider = resource_provider
+        self._evaluator_call_timeout_seconds = evaluator_call_timeout_seconds
 
     def dispatch(self, jobs: list[ClaimedJob]) -> list[DispatchOutcome]:
         """Run every job in `jobs` through `execute_job`, at most
@@ -143,6 +155,7 @@ class Dispatcher:
                         evaluator_config_repository=resources.evaluator_config_repository,
                         results_repository=resources.results_repository,
                         jobs_repository=resources.jobs_repository,
+                        evaluator_call_timeout_seconds=self._evaluator_call_timeout_seconds,
                     )
                 except Exception as exc:  # noqa: BLE001 -- deliberately broad:
                     # one job's failure must never cancel or corrupt any other
@@ -183,5 +196,11 @@ class Dispatcher:
                 "Failed to record failure handling for job %s (original error already "
                 "captured on DispatchOutcome.error)",
                 job.id,
+                extra={
+                    "job_id": str(job.id),
+                    "project_id": str(job.project_id),
+                    "evaluator_name": job.evaluator_name,
+                    "evaluator_version": job.evaluator_version,
+                },
             )
             return None

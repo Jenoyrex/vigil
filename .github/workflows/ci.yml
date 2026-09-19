@@ -1,0 +1,482 @@
+name: CI
+
+# Validates the repository exactly as it exists at HEAD: Ruff + pytest for
+# every independent Python project (apps/api, services/worker,
+# services/evaluator, packages/sdk-python), lint/test/build for
+# apps/dashboard, and a build-only validation of every Phase 4B Dockerfile.
+# No production secrets are required anywhere in this workflow -- every
+# credential below is a fixed, throwaway CI-local value, identical in spirit
+# to infrastructure/docker-compose.yml's own local development defaults.
+
+on:
+  push:
+  pull_request:
+
+# Cancel a still-running run for the same branch/PR once a newer commit
+# supersedes it, so CI minutes aren't spent validating stale commits.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Pinned to the exact uv version services/worker/Dockerfile, apps/api/Dockerfile,
+# and apps/dashboard/Dockerfile's builder stages install
+# (COPY --from=ghcr.io/astral-sh/uv:0.12.7 /uv ...), so CI validates against
+# the identical resolver/installer version production images build with.
+#
+# Note: the shared internal-service-token value used throughout this file
+# ("test-internal-service-token") is hardcoded per-job/per-step rather than
+# defined once here, because the `env` context cannot be referenced from
+# within a job's own `env:` block (only from `run`/`with`/step-`env`
+# values) -- see the two job-level `env:` blocks and the one step-level
+# `env:` block below that all use this exact same literal. It is the same
+# value apps/api's and services/worker's own test suites already default to
+# via os.environ.setdefault(...) in their conftest.py files
+# (apps/api/tests/conftest.py, services/worker/tests/conftest.py), reused
+# here verbatim so a step that runs OUTSIDE pytest (e.g. `alembic upgrade
+# head`, which never imports conftest.py) still sees a consistent value.
+env:
+  UV_VERSION: "0.12.7"
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # apps/api: Ruff + pytest against real Postgres + ClickHouse. Not
+  # optional -- apps/api/tests/conftest.py's db_session fixture has no
+  # skip-if-unreachable guard (unlike services/worker's convention below),
+  # so this suite hard-requires a live Postgres to even collect cleanly.
+  # ---------------------------------------------------------------------
+  api-tests:
+    name: apps/api (Ruff + pytest)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vigil
+          POSTGRES_PASSWORD: vigil
+          POSTGRES_DB: vigil
+        ports:
+          - 5434:5432
+        # GitHub Actions blocks the job's own steps from starting until every
+        # service with a health check reports healthy -- no arbitrary sleep
+        # needed anywhere in this job.
+        options: >-
+          --health-cmd "pg_isready -U vigil -d vigil"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8-alpine
+        env:
+          CLICKHOUSE_USER: vigil
+          CLICKHOUSE_PASSWORD: vigil
+          CLICKHOUSE_DB: vigil
+        ports:
+          - 8123:8123
+          - 9000:9000
+        # Identical health-check command to infrastructure/docker-compose.yml's
+        # own clickhouse service (already proven working against this exact
+        # image during Phase 4B validation).
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      VIGIL_API_DATABASE_URL: postgresql+psycopg://vigil:vigil@localhost:5434/vigil_test
+      VIGIL_API_TEST_DATABASE_URL: postgresql+psycopg://vigil:vigil@localhost:5434/vigil_test
+      VIGIL_API_CLICKHOUSE_HOST: localhost
+      VIGIL_API_CLICKHOUSE_PORT: 8123
+      VIGIL_API_CLICKHOUSE_DATABASE: vigil
+      VIGIL_API_CLICKHOUSE_USER: vigil
+      VIGIL_API_CLICKHOUSE_PASSWORD: vigil
+      VIGIL_API_INTERNAL_SERVICE_TOKEN: test-internal-service-token
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: apps/api/uv.lock
+
+      - name: Install dependencies
+        working-directory: apps/api
+        run: uv sync --frozen
+
+      # `vigil` is created as the Postgres superuser (POSTGRES_USER, not
+      # "postgres") so it can create additional databases -- the exact same
+      # mechanism infrastructure/postgres/init-test-db.sh uses for local dev.
+      - name: Create vigil_test database
+        env:
+          PGPASSWORD: vigil
+        run: psql -h localhost -p 5434 -U vigil -d vigil -c "CREATE DATABASE vigil_test;"
+
+      # apps/api owns the Postgres schema (Alembic); see apps/api/README.md's
+      # documented dev-setup step, reproduced here verbatim for CI.
+      - name: Run Alembic migrations
+        working-directory: apps/api
+        run: uv run alembic upgrade head
+
+      # There is no Alembic equivalent for ClickHouse (see docs/decisions/
+      # 006-deployment-architecture.md, decision 8's sibling reasoning) --
+      # infrastructure/clickhouse/init/*.sql are the single source of truth
+      # for schema, normally applied via the image's
+      # docker-entrypoint-initdb.d mechanism. GitHub Actions service
+      # containers start before checkout, so that automatic-mount timing
+      # isn't available here; instead, apply the exact same, unmodified SQL
+      # files as an explicit step over ClickHouse's HTTP interface. Both
+      # files use CREATE TABLE IF NOT EXISTS, so this is safe to repeat.
+      - name: Create ClickHouse schema
+        run: |
+          set -eu
+          for f in infrastructure/clickhouse/init/*.sql; do
+            echo "Applying $f"
+            curl -sS --fail --data-binary @"$f" "http://localhost:8123/?user=vigil&password=vigil"
+          done
+
+      - name: Ruff
+        working-directory: apps/api
+        run: uv run ruff check app tests
+
+      - name: Pytest
+        working-directory: apps/api
+        run: uv run pytest -q
+
+  # ---------------------------------------------------------------------
+  # services/worker: Ruff + pytest against real Postgres + ClickHouse.
+  # services/worker's own convention (documented in-repo as the
+  # "skip-if-unreachable convention") means every Postgres/ClickHouse
+  # integration test self-skips if these aren't reachable -- this job
+  # provisions them anyway so that coverage actually runs in CI instead of
+  # always skipping.
+  # ---------------------------------------------------------------------
+  worker-tests:
+    name: services/worker (Ruff + pytest)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vigil
+          POSTGRES_PASSWORD: vigil
+          POSTGRES_DB: vigil
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U vigil -d vigil"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8-alpine
+        env:
+          CLICKHOUSE_USER: vigil
+          CLICKHOUSE_PASSWORD: vigil
+          CLICKHOUSE_DB: vigil
+        ports:
+          - 8123:8123
+          - 9000:9000
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      VIGIL_WORKER_TEST_DATABASE_URL: postgresql://vigil:vigil@localhost:5434/vigil_test
+      VIGIL_WORKER_CLICKHOUSE_HOST: localhost
+      VIGIL_WORKER_CLICKHOUSE_PORT: 8123
+      VIGIL_WORKER_CLICKHOUSE_DATABASE: vigil
+      VIGIL_WORKER_CLICKHOUSE_USER: vigil
+      VIGIL_WORKER_CLICKHOUSE_PASSWORD: vigil
+      VIGIL_WORKER_INTERNAL_SERVICE_TOKEN: test-internal-service-token
+      # Same override hook services/worker/Dockerfile sets in production
+      # (VIGIL_EVALUATOR_EMBEDDING_CACHE_DIR), pointed at a path this job
+      # explicitly caches below -- explicit rather than relying on
+      # EmbeddingRelevanceEvaluator's own Path.home()-derived default,
+      # so the cached path and the path fastembed actually reads/writes
+      # can never silently drift apart.
+      VIGIL_EVALUATOR_EMBEDDING_CACHE_DIR: /home/runner/.cache/vigil-evaluator/fastembed
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: |
+            services/worker/uv.lock
+            apps/api/uv.lock
+
+      # services/worker/pyproject.toml declares a LOCAL PATH DEPENDENCY on
+      # services/evaluator ([tool.uv.sources] vigil-evaluator = { path =
+      # "../evaluator" }). This is a plain `uv sync` on the actual checked-out
+      # monorepo tree, not a Docker build -- services/evaluator's sibling
+      # directory is simply present on disk exactly as committed, so none of
+      # services/worker/Dockerfile's additional-build-context machinery (or
+      # services/evaluator/.dockerignore, which only filters a Docker build
+      # context) is relevant here.
+      - name: Install worker dependencies
+        working-directory: services/worker
+        run: uv sync --frozen
+
+      # apps/api's Alembic migrations are what actually create the Postgres
+      # schema services/worker's integration tests assume already exists
+      # (services/worker talks to that schema via raw psycopg; it does not
+      # own or migrate it itself).
+      - name: Install apps/api dependencies (for Alembic)
+        working-directory: apps/api
+        run: uv sync --frozen
+
+      - name: Create vigil_test database
+        env:
+          PGPASSWORD: vigil
+        run: psql -h localhost -p 5434 -U vigil -d vigil -c "CREATE DATABASE vigil_test;"
+
+      - name: Run Alembic migrations (schema owned by apps/api)
+        working-directory: apps/api
+        env:
+          VIGIL_API_DATABASE_URL: postgresql+psycopg://vigil:vigil@localhost:5434/vigil_test
+          VIGIL_API_INTERNAL_SERVICE_TOKEN: test-internal-service-token
+        run: uv run alembic upgrade head
+
+      - name: Create ClickHouse schema
+        run: |
+          set -eu
+          for f in infrastructure/clickhouse/init/*.sql; do
+            echo "Applying $f"
+            curl -sS --fail --data-binary @"$f" "http://localhost:8123/?user=vigil&password=vigil"
+          done
+
+      # services/worker unconditionally depends on vigil-evaluator[embedding]
+      # (not extras-gated), so `uv sync` above already installed fastembed/
+      # onnxruntime, and worker/tests/test_registry.py constructs a real
+      # EmbeddingRelevanceEvaluator, which downloads the real ~67MB
+      # BAAI/bge-small-en-v1.5 model from Hugging Face on first use. This is
+      # a demonstrated, real source of CI flakiness/slowness (observed
+      # directly during Phase 4B validation: a fresh download once timed out
+      # against this evaluator's internal 90s per-call timeout, then
+      # succeeded cleanly on retry). Caching the resolved model files here
+      # removes the network dependency entirely on every run after the
+      # first.
+      #
+      # Cache-key note: the key below is a fixed string, not derived from
+      # any lockfile hash, because the model name is a hardcoded constant
+      # (MODEL_NAME in services/evaluator/app/embedding_relevance.py), not a
+      # resolved dependency version. Bump the trailing "-v1" to "-v2" if
+      # that MODEL_NAME ever changes, if fastembed's on-disk cache format
+      # ever changes in a way that could make a previously-cached directory
+      # stale/incompatible, OR if the pinned `fastembed`/`huggingface_hub`
+      # versions change in services/worker/uv.lock or
+      # services/evaluator/uv.lock -- a version bump can change the on-disk
+      # cache layout even while MODEL_NAME stays the same, and nothing else
+      # about a routine dependency bump would otherwise prompt anyone to
+      # revisit this key.
+      #
+      # Cache-population note: GitHub Actions cache entries are only saved
+      # once their job finishes, and are not visible to OTHER jobs already
+      # running in the SAME workflow run -- so on the very first run after
+      # this workflow is added (or after this key is bumped), this job and
+      # evaluator-tests below will independently pay the download cost once
+      # each, in parallel. From the second run onward, both jobs restore the
+      # same warm cache and never touch the network for this again. This is
+      # normal GitHub Actions cache scoping, not a bug in this workflow.
+      - name: Restore FastEmbed model cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/vigil-evaluator/fastembed
+          key: fastembed-bge-small-en-v1.5-v1
+
+      - name: Ruff
+        working-directory: services/worker
+        run: uv run ruff check worker tests
+
+      - name: Pytest
+        working-directory: services/worker
+        run: uv run pytest -q
+
+  # ---------------------------------------------------------------------
+  # services/evaluator: pure algorithmic package, no datastore dependency
+  # at all. The `embedding` extra is optional there (unlike
+  # services/worker's unconditional dependency), so it's installed
+  # explicitly to get real (non-importorskip'd) coverage of
+  # embedding_relevance.py, including the same FastEmbed download this
+  # job also caches.
+  # ---------------------------------------------------------------------
+  evaluator-tests:
+    name: services/evaluator (Ruff + pytest)
+    runs-on: ubuntu-latest
+
+    env:
+      VIGIL_EVALUATOR_EMBEDDING_CACHE_DIR: /home/runner/.cache/vigil-evaluator/fastembed
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: services/evaluator/uv.lock
+
+      - name: Install dependencies (with embedding extra)
+        working-directory: services/evaluator
+        run: uv sync --frozen --extra embedding
+
+      # Same cache, same key, same rationale as worker-tests above -- see
+      # that job's step for the full explanation of the key and of
+      # cross-job cache-population timing.
+      - name: Restore FastEmbed model cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/vigil-evaluator/fastembed
+          key: fastembed-bge-small-en-v1.5-v1
+
+      - name: Ruff
+        working-directory: services/evaluator
+        run: uv run ruff check app tests
+
+      - name: Pytest
+        working-directory: services/evaluator
+        run: uv run pytest -q
+
+  # ---------------------------------------------------------------------
+  # packages/sdk-python: fully self-contained. All HTTP is faked via
+  # httpx.MockTransport (see packages/sdk-python/tests/conftest.py); the
+  # one real-network test (test_integration.py) self-skips without a
+  # locally running API, which this job deliberately does not provide.
+  # ---------------------------------------------------------------------
+  sdk-python-tests:
+    name: packages/sdk-python (Ruff + pytest)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: packages/sdk-python/uv.lock
+
+      - name: Install dependencies
+        working-directory: packages/sdk-python
+        run: uv sync --frozen
+
+      - name: Ruff
+        working-directory: packages/sdk-python
+        run: uv run ruff check src tests
+
+      - name: Pytest
+        working-directory: packages/sdk-python
+        run: uv run pytest -q
+
+  # ---------------------------------------------------------------------
+  # apps/dashboard: lint, test, build. `next build` performs TypeScript
+  # type-checking as part of the build (next.config.ts sets no
+  # typescript.ignoreBuildErrors), so no separate type-check step exists or
+  # is needed.
+  # ---------------------------------------------------------------------
+  dashboard:
+    name: apps/dashboard (lint + test + build)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm must be on PATH before actions/setup-node's cache: pnpm option
+      # can detect it, hence this order. Version pinned to match
+      # apps/dashboard/package.json's own "packageManager": "pnpm@11.9.0"
+      # (the same version apps/dashboard/Dockerfile activates via
+      # `corepack prepare pnpm@11.9.0 --activate`) -- there is no root
+      # package.json for pnpm/action-setup to auto-detect this from, so it
+      # is passed explicitly rather than relying on auto-detection.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm --dir apps/dashboard lint
+
+      - name: Test
+        run: pnpm --dir apps/dashboard test
+
+      - name: Build
+        run: pnpm --dir apps/dashboard build
+
+  # ---------------------------------------------------------------------
+  # Build-only validation of every Phase 4B Dockerfile. No push, no run, no
+  # deploy -- BuildKit still executes every RUN instruction to determine
+  # success, it simply doesn't export/tag/push the resulting image anywhere.
+  # This alone would have caught Phase 4B's evaluator/.dockerignore gap and
+  # the HOME/cache-dir permission bug before either needed a manual review
+  # pass to surface.
+  # ---------------------------------------------------------------------
+  docker-build:
+    name: Docker build (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: apps/api
+            context: apps/api
+            dockerfile: apps/api/Dockerfile
+            build-contexts: ""
+          - name: apps/dashboard
+            context: apps/dashboard
+            dockerfile: apps/dashboard/Dockerfile
+            # Matches infrastructure/docker-compose.prod.yml's
+            # additional_contexts: workspace: .. (relative to
+            # infrastructure/) -- from the repo root, that same target is
+            # ".".
+            build-contexts: "workspace=."
+          - name: services/worker
+            context: services/worker
+            dockerfile: services/worker/Dockerfile
+            # services/evaluator/.dockerignore (added in Phase 4B) is what
+            # keeps this context small -- without it, this build would send
+            # services/evaluator's local .venv/.pytest_cache/.ruff_cache/
+            # .cache (including the non-redistributable WikiQA dataset, if
+            # present on disk) into this build's context. A fresh GitHub
+            # Actions runner has none of that local dev state to begin with,
+            # so this job cannot by itself detect a regression here -- see
+            # the "limitations" note in the implementation report.
+            build-contexts: "evaluator=services/evaluator"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          build-contexts: ${{ matrix.build-contexts }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
