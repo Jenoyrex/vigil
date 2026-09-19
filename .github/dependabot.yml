@@ -1,0 +1,80 @@
+version: 2
+
+# Dependabot version/security update configuration (F10). Each entry below
+# corresponds to one independently-versioned dependency manifest in this
+# monorepo -- see the ecosystem-specific notes for why `directory` isn't
+# always the directory a human would guess.
+#
+# `services/worker` has a local path dependency on `services/evaluator`
+# ([tool.uv.sources] vigil-evaluator = { path = "../evaluator" }, see
+# services/worker/pyproject.toml) -- this is a plain path source, not a
+# `[tool.uv.workspace]` (confirmed: no pyproject.toml in this repo declares
+# one), so `services/worker/uv.lock` is fully self-contained, not a shared
+# workspace lockfile spanning multiple manifests. Dependabot's documented
+# uv-ecosystem gaps are specifically about `[tool.uv.workspace]` setups;
+# this repo has none. A non-registry (local path) dependency like
+# `vigil-evaluator` is simply skipped for version-bump purposes, the same
+# way Dependabot already handles a `file:`/`git+`-sourced dependency in any
+# other ecosystem -- it does not invalidate updates for this manifest's
+# other, registry-resolved dependencies.
+updates:
+  - package-ecosystem: "uv"
+    directory: "/apps/api"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "uv"
+    directory: "/services/worker"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "uv"
+    directory: "/services/evaluator"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "uv"
+    directory: "/packages/sdk-python"
+    schedule:
+      interval: "weekly"
+
+  # apps/dashboard's package.json is a pnpm-workspace member, but the
+  # lockfile pnpm actually writes and reads (pnpm-lock.yaml) lives at the
+  # REPO ROOT, not inside apps/dashboard/ (confirmed: no
+  # apps/dashboard/pnpm-lock.yaml exists). Pointing `directory` at
+  # /apps/dashboard instead of the lockfile's actual location is a
+  # documented source of Dependabot failing to update the shared root
+  # lockfile correctly in pnpm-workspace repos (dependabot-core#11135) --
+  # "/" is the technically correct value here, not a stylistic choice.
+  # pnpm is auto-detected from pnpm-lock.yaml; the ecosystem value is still
+  # "npm" (pnpm has no separate package-ecosystem name).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/api"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/services/worker"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/dashboard"
+    schedule:
+      interval: "weekly"
+
+  # GitHub's own documented convention: "/" is the correct value for the
+  # github-actions ecosystem regardless of where workflow files actually
+  # live -- Dependabot always looks in .github/workflows/ (and any
+  # action.yml at the repo root) from there. Unlike every other ecosystem
+  # above, this is not "directory relative to repo root", it's a fixed
+  # sentinel value.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
