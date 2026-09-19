@@ -83,11 +83,19 @@ def _post_until_visible(
     headers: dict,
     project_id,
     trace_id: str,
-    span_id: str,
-    max_attempts: int = 5,
+    span_ids: list[str],
+    max_attempts: int = 10,
 ):
-    """POST `payload`, retrying (a fresh POST, not a query poll) until the
-    span is visible or `max_attempts` is reached. Returns the last response.
+    """POST `payload`, retrying (a fresh POST, not a query poll) until every
+    id in `span_ids` is visible or `max_attempts` is reached. Returns the
+    last response.
+
+    Checking every submitted span, not just one, matters for callers that
+    ingest more than one span per batch: each span's visibility is an
+    independent event (see the flakiness this helper exists to work around,
+    below), so a batch of N spans can have any subset of them visible after
+    a given attempt -- stopping as soon as a single chosen span is visible
+    would let the others silently stay missing.
 
     This local environment's `clickhouse-connect` HTTP client has been
     observed, empirically and independently of our own repository/schema
@@ -109,10 +117,13 @@ def _post_until_visible(
     for _ in range(max_attempts):
         response = real_client.post("/v1/traces", json=payload, headers=headers)
         assert response.status_code == 200
-        count = _span_count(
-            ch_client, project_id=project_id, trace_id=trace_id, span_id=span_id, final=True
-        )
-        if count >= 1:
+        if all(
+            _span_count(
+                ch_client, project_id=project_id, trace_id=trace_id, span_id=span_id, final=True
+            )
+            >= 1
+            for span_id in span_ids
+        ):
             break
     return response
 
@@ -136,7 +147,7 @@ def test_ingest_query_and_duplicate_behavior_against_real_clickhouse(
         headers=headers,
         project_id=active_api_key.project.id,
         trace_id=trace_id,
-        span_id=span_id,
+        span_ids=[span_id],
     )
     assert response.status_code == 200
     assert response.json()["accepted"] == 1
