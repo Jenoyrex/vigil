@@ -137,7 +137,7 @@ def test_list_detail_span_and_analytics_against_real_clickhouse(
         headers=headers,
         project_id=active_api_key.project.id,
         trace_id=trace_id,
-        span_id=root_span_id,
+        span_ids=[root_span_id, child_span_id],
     )
     assert ingest_response.status_code == 200
     assert ingest_response.json()["accepted"] == 2
@@ -239,7 +239,7 @@ def test_tenant_isolation_against_real_clickhouse(
         headers=headers_a,
         project_id=active_api_key.project.id,
         trace_id=trace_id,
-        span_id=span_id,
+        span_ids=[span_id],
     )
     assert ingest_response.status_code == 200
 

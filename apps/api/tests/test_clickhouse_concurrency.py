@@ -99,20 +99,32 @@ def real_client_unmocked_clickhouse(
     `test_query_clickhouse_integration.real_client` (a real ClickHouse
     client, but pre-bound into the repository dependencies by the test
     fixture itself -- which would only prove one shared client fails, not
-    that the app's own dependency wiring is safe), this fixture overrides
-    *only* `get_db`. Every ClickHouse repository dependency
-    (`get_spans_repository`, `get_traces_query_repository`,
-    `get_analytics_repository`, `get_evaluations_query_repository`) is left
-    exactly as production wires it, so concurrent requests through this
-    client exercise the real `get_..._repository()` -> `get_clickhouse_client()`
-    path -- the actual code the FastAPI threadpool race lives in.
+    that the app's own dependency wiring is safe), this fixture leaves every
+    ClickHouse repository dependency (`get_spans_repository`,
+    `get_traces_query_repository`, `get_analytics_repository`,
+    `get_evaluations_query_repository`) exactly as production wires it, so
+    concurrent requests through this client exercise the real
+    `get_..._repository()` -> `get_clickhouse_client()` path -- the actual
+    code the FastAPI threadpool race lives in.
 
     `get_db` still needs overriding to point at the test database, but
     (unlike the single shared `db_session` other fixtures use) with a fresh
     `Session` per call -- SQLAlchemy sessions are no safer for concurrent
     use than the ClickHouse client this test exists to check, and reusing
     one here would add an unrelated source of failure to this test.
+
+    `get_default_rate_limiter` is also overridden, with a dedicated,
+    generously-sized `RateLimiter` -- this test's single API key legitimately
+    makes 88 requests (10 analytics bursts of 8, then a traces burst of 8) to
+    exercise the ClickHouse concurrency path, which exceeds production's
+    default per-key budget (60 capacity / 20 tokens per second,
+    `app.config.settings`) on a fast enough environment. That budget is
+    correct, unrelated production behavior this test isn't about -- swapping
+    in a generous limiter here isolates it, the same way overriding `get_db`
+    isolates this test from the real Postgres pool without weakening
+    anything ClickHouse-concurrency-specific.
     """
+    from app.api.rate_limit import RateLimiter, get_default_rate_limiter
     from app.db.session import get_db
     from app.main import app
 
@@ -124,6 +136,9 @@ def real_client_unmocked_clickhouse(
             session.close()
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_default_rate_limiter] = lambda: RateLimiter(
+        capacity=1000, refill_per_second=1000, max_tracked_keys=10
+    )
     try:
         with TestClient(app) as test_client:
             yield test_client
