@@ -68,6 +68,15 @@ is still computed by the database (avoiding client clock skew) while the decisio
 stays at the application layer. This only refreshes `updated_at` for writes made through
 SQLAlchemy — a documented, accepted limitation while all writes go through the ORM.
 
+### Connection timeout
+
+`VIGIL_API_DATABASE_TIMEOUT_SECONDS` (default `10.0`) bounds both PostgreSQL connection
+establishment and server-side statement execution — see `app/db/session.py`'s `engine`, which
+passes it as `connect_args={"connect_timeout": ..., "options": "-c statement_timeout=..."}`, and
+`docs/decisions/006-deployment-architecture.md`'s "Known limitations" section. A stuck query is
+genuinely cancelled server-side, not just abandoned client-side; a stuck new-connection attempt is
+bounded the same way. Mirrors `services/worker`'s identical `VIGIL_WORKER_DATABASE_TIMEOUT_SECONDS`.
+
 ## ClickHouse setup
 
 Start a local ClickHouse instance from `infrastructure` (see

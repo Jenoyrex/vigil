@@ -10,6 +10,15 @@ class Settings(BaseSettings):
     app_name: str = "Vigil API"
     database_url: str = "postgresql+psycopg://vigil:vigil@localhost:5434/vigil"
 
+    # PostgreSQL I/O bound (Phase 4D), mirroring services/worker/worker/
+    # postgres/client.py's identical setting/rationale and this class's own
+    # clickhouse_timeout_seconds below: bounds both connection establishment
+    # (libpq's connect_timeout) and server-side statement execution
+    # (PostgreSQL's own statement_timeout, set via the engine's connect_args
+    # -- see app/db/session.py), so a stuck query can no longer occupy an
+    # API request thread indefinitely.
+    database_timeout_seconds: float = 10.0
+
     # Structured logging (Phase 4D, F4, app/logging_config.py). Standard
     # Python logging level name -- validated below so a typo fails loudly at
     # process start (the same posture `cors_allowed_origins_list` already

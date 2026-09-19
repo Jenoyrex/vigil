@@ -380,14 +380,20 @@ introduced.
 
 ## Known limitations
 
-- **~~No I/O timeout on PostgreSQL calls~~ -- resolved, Phase 4D.** `services/worker/worker
-  /postgres/client.py`'s `get_connection()` now sets both libpq's `connect_timeout` and
-  PostgreSQL's own server-side `statement_timeout` from the new `database_timeout_seconds`
-  setting (mirroring `worker/clickhouse/client.py`'s pre-existing `connect_timeout`/
-  `send_receive_timeout` pattern) -- a stuck PostgreSQL call can no longer block a worker thread
-  indefinitely. One residual, explicitly accepted gap remains: a network partition occurring
-  *after* a connection is established, where the server's own cancellation response never
-  arrives, could in principle still exceed this bound -- see that module's own docstring.
+- **~~No I/O timeout on PostgreSQL calls~~ -- resolved, Phase 4D, both services.**
+  `services/worker/worker/postgres/client.py`'s `get_connection()` sets both libpq's
+  `connect_timeout` and PostgreSQL's own server-side `statement_timeout` from the worker's
+  `database_timeout_seconds` setting (mirroring `worker/clickhouse/client.py`'s pre-existing
+  `connect_timeout`/`send_receive_timeout` pattern) -- a stuck PostgreSQL call can no longer block
+  a worker thread indefinitely. `apps/api/app/db/session.py`'s SQLAlchemy `engine` closes the
+  identical gap on the API side, via the same `connect_timeout`/`statement_timeout` pair passed as
+  `connect_args` (SQLAlchemy's documented mechanism for forwarding driver-specific connection
+  parameters to `psycopg`), bounded by its own `database_timeout_seconds` setting -- a stuck query
+  can no longer occupy an API request thread indefinitely either, and `pool_pre_ping`'s own
+  liveness `SELECT` is now implicitly bounded by the same setting as a side effect. One residual,
+  explicitly accepted gap remains on both sides: a network partition occurring *after* a
+  connection is established, where the server's own cancellation response never arrives, could in
+  principle still exceed this bound -- see each module's own docstring.
 - **~~No HTTP healthcheck for `worker`/`poller`~~ -- resolved differently, Phase 4D.** Rather than
   adding an HTTP server to either process solely to satisfy a healthcheck (new exposed network
   surface for zero other benefit), both `worker/runtime.py`'s `WorkerRuntime.run` and
