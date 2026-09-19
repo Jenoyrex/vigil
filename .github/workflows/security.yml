@@ -1,0 +1,103 @@
+name: Security
+
+# Dependency/config vulnerability scanning (F10) via Trivy. Deliberately a
+# separate workflow from ci.yml/cd.yml -- neither is modified by this file.
+# Functional validation (does the code work) and vulnerability scanning (is
+# a dependency/Dockerfile known-bad) are different concerns with different
+# failure semantics: a dependency that was fine yesterday can have a new
+# CVE disclosed today with zero code change, which is exactly what the
+# schedule trigger below exists to catch, independent of any push/PR.
+#
+# Scope, deliberately: filesystem (lockfile) + config (Dockerfile)
+# scanning only, not container-image scanning. Actual image CVE scanning
+# is a documented follow-up, not implemented here -- see the note on the
+# `scan` job below for why (rebuilding all three production images a
+# second time on every push/PR is exactly the kind of unnecessary
+# duplication this stays away from; ci.yml's own docker-build job already
+# builds them once, build-only, with no tag/load Trivy could reuse).
+#
+# aquasecurity/trivy-action is pinned by commit SHA, not a mutable version
+# tag: the action suffered a real supply-chain compromise in March 2026 (a
+# credential stealer injected via imposter commits, affecting every tag
+# from 0.0.1 through 0.34.2 -- https://www.stepsecurity.io/blog/trivy-compromised-a-second-time---trivy-action-github-actions-compromised).
+# v0.36.0 (2026-04-22) postdates the incident and its full remediation.
+# SHA-pinning, not just an exact version tag, is the actual defense against
+# a repeat of that specific attack class (a maintainer account or CI
+# re-pointing a tag after the fact) -- a version tag alone doesn't provide
+# that guarantee.
+
+on:
+  push:
+  pull_request:
+  schedule:
+    # Mondays 06:00 UTC -- an arbitrary but fixed, off-peak weekly slot,
+    # independent of .github/dependabot.yml's own weekly update cadence, so
+    # a newly-disclosed CVE for an otherwise-unchanged dependency is caught
+    # even between Dependabot runs, not just when a PR happens to trigger
+    # this workflow.
+    - cron: "0 6 * * 1"
+
+# Cancel a still-running push/PR scan for the same ref once a newer commit
+# supersedes it -- same convention ci.yml already uses. A scheduled run is
+# never cancelled by this: github.ref is the default branch on every
+# schedule trigger, so a weekly run only ever competes with another weekly
+# run of itself, never with a push/PR scan.
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------
+  # One job, three triggers (push/pull_request/schedule), identical steps.
+  # No separate "blocking" vs "non-blocking" job needed: exit-code: "1"
+  # failing this job is the correct, sufficient signal for all three --
+  # on push/PR it fails the check GitHub attaches to that commit/PR; on a
+  # schedule trigger there is no PR to block (nothing invents one), the
+  # failed run itself, visible in the Actions tab and GitHub's own
+  # scheduled-workflow-failure notifications, IS the "surfaced clearly"
+  # signal.
+  # ---------------------------------------------------------------------
+  scan:
+    name: Trivy filesystem + config scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Reads every apps/*/uv.lock, services/*/uv.lock, packages/*/uv.lock,
+      # and the root pnpm-lock.yaml directly -- no `uv sync`/`pnpm install`
+      # needed first, Trivy's fs scanner parses each lockfile's pinned
+      # versions itself. Confirmed locally (2026-09-19) against this exact
+      # repository: all 4 uv.lock files and pnpm-lock.yaml are correctly
+      # detected and scanned.
+      - name: Trivy filesystem scan (dependency vulnerabilities)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+
+      # Lints all three production Dockerfiles for misconfiguration
+      # (missing USER, writable sensitive paths, etc.) -- static analysis
+      # of the Dockerfile text itself, no image build required. Confirmed
+      # locally against this exact repository: all three Dockerfiles
+      # (apps/api, apps/dashboard, services/worker) are correctly detected
+      # and scanned.
+      - name: Trivy config scan (Dockerfile misconfiguration)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          # The OPA checks-bundle download this scan type depends on was
+          # observed, locally, to occasionally need longer than the
+          # action's 5-minute default under a slow/congested connection --
+          # GitHub-hosted runners' network to ghcr.io (where the bundle is
+          # distributed) is normally fast and reliable, but this is cheap,
+          # evidence-based headroom rather than a guess.
+          timeout: 10m
