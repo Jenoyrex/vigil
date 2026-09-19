@@ -5,7 +5,24 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+engine = create_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    # PostgreSQL I/O bound (Phase 4D) -- mirrors services/worker/worker/
+    # postgres/client.py's identical connect_timeout/statement_timeout pair
+    # via the same settings.database_timeout_seconds knob (see
+    # app/config.py). connect_timeout is libpq's own connection-establishment
+    # bound; the `options` value sets PostgreSQL's statement_timeout as a
+    # session GUC at connect time, which -- because it isn't transaction-
+    # scoped -- stays in effect for a pooled connection's entire lifetime,
+    # not just its first checkout. Without this, a stuck query (or even
+    # pool_pre_ping's own liveness SELECT) could block a request thread
+    # indefinitely.
+    connect_args={
+        "connect_timeout": int(settings.database_timeout_seconds),
+        "options": f"-c statement_timeout={int(settings.database_timeout_seconds * 1000)}",
+    },
+)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
