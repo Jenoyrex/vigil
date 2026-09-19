@@ -29,7 +29,12 @@ from app.clickhouse.client import get_clickhouse_client
 from app.clickhouse.repository import SpansRepository
 from app.config import settings
 from helpers import valid_span, valid_traces_payload
-from test_traces_clickhouse_integration import _post_until_visible
+from test_traces_clickhouse_integration import (
+    _STABLE_POLL_ATTEMPTS,
+    _STABLE_POLL_INTERVAL_SECONDS,
+    _post_until_visible,
+    _stable_read,
+)
 
 
 def _recent_span_times(offset_seconds: float = 0.0) -> tuple[str, str]:
@@ -143,11 +148,32 @@ def test_list_detail_span_and_analytics_against_real_clickhouse(
     assert ingest_response.json()["accepted"] == 2
 
     # -- GET /v1/traces (list) -- default (last 24h) window ---------------
-    list_response = real_client.get("/v1/traces", headers=headers)
-    assert list_response.status_code == 200
-    traces = list_response.json()["traces"]
-    assert len(traces) == 1
-    [trace_summary] = traces
+    # `span_count` -- computed by app/clickhouse/query_repository.py's
+    # `list_traces`, deliberately without FINAL (see that method's
+    # docstring) -- goes through the same non-monotonic-visibility window
+    # `_stable_read` exists for, so a single read isn't trusted here either:
+    # require it to read 2 on two consecutive polls before asserting on it.
+    # `traces_seen` != 1 (trace not visible at all yet) is folded into the
+    # same "not stable, keep polling" outcome rather than raising, since
+    # that's the same underlying flake, just one read earlier in the chain.
+    def _fetch_trace_summary() -> dict:
+        resp = real_client.get("/v1/traces", headers=headers)
+        assert resp.status_code == 200
+        traces = resp.json()["traces"]
+        if len(traces) != 1:
+            return {"span_count": None, "traces_seen": len(traces)}
+        return traces[0]
+
+    stable, trace_summary, observed = _stable_read(
+        fetch=_fetch_trace_summary,
+        predicate=lambda summary: summary.get("span_count") == 2,
+        attempts=_STABLE_POLL_ATTEMPTS,
+        interval_seconds=_STABLE_POLL_INTERVAL_SECONDS,
+    )
+    assert stable, (
+        f"trace {trace_id}'s span_count never stabilized at 2 within "
+        f"{_STABLE_POLL_ATTEMPTS} attempts; observed: {observed}"
+    )
     assert trace_summary["trace_id"] == trace_id
     assert trace_summary["status"] == "ok"
     assert trace_summary["span_count"] == 2
