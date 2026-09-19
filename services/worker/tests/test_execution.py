@@ -11,6 +11,8 @@ ordered call list across two different repository objects' methods.
 
 from __future__ import annotations
 
+import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -26,6 +28,7 @@ from worker.execution import EvaluationOutcome, SourceSpanNotFoundError, execute
 from worker.postgres.evaluator_config_repository import EvaluatorConfigRepository
 from worker.postgres.repository import ClaimedJob, EvaluationJobsRepository
 from worker.registry import EvaluatorRegistry, UnknownEvaluatorError
+from worker.timeouts import EvaluatorTimeoutError
 
 JOB_ID = uuid.uuid4()
 PROJECT_ID = uuid.uuid4()
@@ -49,6 +52,31 @@ class FakeEvaluator:
 
     def evaluate(self, evaluator_input, *, threshold=None) -> EvaluationResult:
         self.calls.append(SimpleNamespace(evaluator_input=evaluator_input, threshold=threshold))
+        return EvaluationResult(
+            evaluator_name=self.name,
+            evaluator_version=self.version,
+            score=0.9,
+            label="relevant",
+            explanation="fake",
+            evaluation_latency_ms=1.0,
+            evaluation_cost_usd=None,
+            evaluator_model="fake-model",
+            evaluator_provider=None,
+        )
+
+
+class SlowEvaluator:
+    """An `Evaluator` test double whose `evaluate()` blocks on a
+    `threading.Event` the test controls -- never a real, unbounded hang."""
+
+    name = "slow_evaluator"
+    version = "0.1.0"
+
+    def __init__(self, release: threading.Event) -> None:
+        self._release = release
+
+    def evaluate(self, evaluator_input, *, threshold=None) -> EvaluationResult:
+        self._release.wait(timeout=5.0)
         return EvaluationResult(
             evaluator_name=self.name,
             evaluator_version=self.version,
@@ -364,3 +392,146 @@ def test_missing_evaluator_raises_structured_error_and_touches_no_persistence(
     assert fake_clickhouse_client.insert_calls == []
     assert fake_clickhouse_client.query_calls == []
     assert fake_postgres_connection.calls == []
+
+
+# -- evaluator call timeout (Phase 4A) ----------------------------------------
+
+
+def test_evaluator_call_timeout_raises_evaluator_timeout_error(
+    fake_clickhouse_client,
+    fake_postgres_connection,
+    span_repository,
+    evaluator_config_repository,
+    results_repository,
+    jobs_repository,
+) -> None:
+    _queue_span(fake_clickhouse_client)
+    _queue_config(fake_postgres_connection, threshold=None)
+
+    release = threading.Event()
+    slow_evaluator = SlowEvaluator(release)
+    registry = EvaluatorRegistry(evaluators=[slow_evaluator])
+    job = _job(evaluator_name=slow_evaluator.name, evaluator_version=slow_evaluator.version)
+
+    try:
+        with pytest.raises(EvaluatorTimeoutError):
+            execute_job(
+                job,
+                registry=registry,
+                span_repository=span_repository,
+                evaluator_config_repository=evaluator_config_repository,
+                results_repository=results_repository,
+                jobs_repository=jobs_repository,
+                evaluator_call_timeout_seconds=0.05,
+            )
+    finally:
+        release.set()  # let the orphaned evaluate() call finish
+
+
+def test_evaluator_call_timeout_writes_no_clickhouse_result(
+    fake_clickhouse_client,
+    fake_postgres_connection,
+    span_repository,
+    evaluator_config_repository,
+    results_repository,
+    jobs_repository,
+) -> None:
+    _queue_span(fake_clickhouse_client)
+    _queue_config(fake_postgres_connection, threshold=None)
+
+    release = threading.Event()
+    slow_evaluator = SlowEvaluator(release)
+    registry = EvaluatorRegistry(evaluators=[slow_evaluator])
+    job = _job(evaluator_name=slow_evaluator.name, evaluator_version=slow_evaluator.version)
+
+    try:
+        with pytest.raises(EvaluatorTimeoutError):
+            execute_job(
+                job,
+                registry=registry,
+                span_repository=span_repository,
+                evaluator_config_repository=evaluator_config_repository,
+                results_repository=results_repository,
+                jobs_repository=jobs_repository,
+                evaluator_call_timeout_seconds=0.05,
+            )
+    finally:
+        release.set()
+
+    assert fake_clickhouse_client.insert_calls == []
+
+
+def test_evaluator_call_timeout_never_calls_mark_succeeded(
+    fake_clickhouse_client,
+    fake_postgres_connection,
+    span_repository,
+    evaluator_config_repository,
+    results_repository,
+    jobs_repository,
+) -> None:
+    _queue_span(fake_clickhouse_client)
+    _queue_config(fake_postgres_connection, threshold=None)
+    fake_postgres_connection.queue_result(rowcount=1)  # would be mark_succeeded's response
+
+    release = threading.Event()
+    slow_evaluator = SlowEvaluator(release)
+    registry = EvaluatorRegistry(evaluators=[slow_evaluator])
+    job = _job(evaluator_name=slow_evaluator.name, evaluator_version=slow_evaluator.version)
+
+    manager = Mock()
+    manager.attach_mock(Mock(wraps=jobs_repository.mark_succeeded), "mark_succeeded")
+    jobs_repository.mark_succeeded = manager.mark_succeeded
+
+    try:
+        with pytest.raises(EvaluatorTimeoutError):
+            execute_job(
+                job,
+                registry=registry,
+                span_repository=span_repository,
+                evaluator_config_repository=evaluator_config_repository,
+                results_repository=results_repository,
+                jobs_repository=jobs_repository,
+                evaluator_call_timeout_seconds=0.05,
+            )
+    finally:
+        release.set()
+
+    manager.mark_succeeded.assert_not_called()
+
+
+def test_evaluator_call_timeout_does_not_block_the_caller_past_the_configured_timeout(
+    fake_clickhouse_client,
+    fake_postgres_connection,
+    span_repository,
+    evaluator_config_repository,
+    results_repository,
+    jobs_repository,
+) -> None:
+    """The actual regression this item exists to fix: `execute_job` itself
+    must return (by raising) promptly, never blocking for however long the
+    hung evaluate() call keeps running underneath it."""
+    _queue_span(fake_clickhouse_client)
+    _queue_config(fake_postgres_connection, threshold=None)
+
+    release = threading.Event()  # deliberately never set within this test's
+    # bounded window -- proving execute_job doesn't wait for it regardless.
+    slow_evaluator = SlowEvaluator(release)
+    registry = EvaluatorRegistry(evaluators=[slow_evaluator])
+    job = _job(evaluator_name=slow_evaluator.name, evaluator_version=slow_evaluator.version)
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(EvaluatorTimeoutError):
+            execute_job(
+                job,
+                registry=registry,
+                span_repository=span_repository,
+                evaluator_config_repository=evaluator_config_repository,
+                results_repository=results_repository,
+                jobs_repository=jobs_repository,
+                evaluator_call_timeout_seconds=0.05,
+            )
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0, "execute_job must not block on a hung evaluate() call"
+    finally:
+        release.set()

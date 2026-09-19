@@ -125,16 +125,20 @@ curl http://127.0.0.1:8000/ready
 
 ### API-key authentication
 
-There is no key-issuance HTTP endpoint yet. For local development, mint a key against a demo
-project with:
+For local development, mint a key against a demo project with:
 
 ```bash
 uv run python scripts/seed_local_api_key.py
 ```
 
-This prints a raw key exactly once — e.g. `vgl_41ce27b462d0.jeK-Mf6i9aRYOrQvm1ZbNYD3aFibJdzHcmbLEAJ592c`
-— and cannot be recovered afterwards; the database only ever stores a SHA-256 hash of it
-(`app/security/api_keys.py`), never the raw value.
+For a production deployment's first key, see "Provisioning" below instead —
+`POST /v1/provisioning/bootstrap` is the HTTP equivalent of this script, protected by a
+one-time bootstrap secret.
+
+Either way, the raw key is printed/returned exactly once — e.g.
+`vgl_41ce27b462d0.jeK-Mf6i9aRYOrQvm1ZbNYD3aFibJdzHcmbLEAJ592c` — and cannot be recovered
+afterwards; the database only ever stores a SHA-256 hash of it (`app/security/api_keys.py`),
+never the raw value.
 
 Send it as `Authorization: Bearer <api-key>`. On each request the API:
 
@@ -288,6 +292,263 @@ the top 50 by `total_cost_usd`. `total_cost_usd` is a JSON **string**, not a num
 | `VIGIL_API_MAX_QUERY_WINDOW_DAYS` | `7` | Max `start_time_from`/`start_time_to` span for list/analytics endpoints |
 | `VIGIL_API_DEFAULT_QUERY_WINDOW_HOURS` | `24` | Window used when both bounds are omitted |
 | `VIGIL_API_MAX_SPANS_PER_TRACE_RESPONSE` | `2000` | Cap on spans returned by trace detail |
+
+## Rate limiting
+
+Every authenticated customer endpoint is rate limited per API key (`AuthenticatedKey.api_key_id`,
+never the raw key or `project_id` alone), via a small in-process token bucket
+(`app/api/rate_limit.py`) -- no Redis or external store. Two tiers:
+
+| Tier | Applies to | Default capacity (burst) | Default refill |
+|---|---|---|---|
+| Ingestion | `POST /v1/traces` | `VIGIL_API_RATE_LIMIT_INGESTION_CAPACITY` (20) | `VIGIL_API_RATE_LIMIT_INGESTION_REFILL_PER_SECOND` (5/s) |
+| Default | Every other authenticated endpoint (`GET /v1/traces*`, `GET /v1/analytics/*`, `GET`/`PUT /v1/evaluations/*` except job creation) | `VIGIL_API_RATE_LIMIT_DEFAULT_CAPACITY` (60) | `VIGIL_API_RATE_LIMIT_DEFAULT_REFILL_PER_SECOND` (20/s) |
+
+These are starting-point defaults, not load-tested production numbers -- there is no production
+traffic history yet to calibrate against.
+
+Not rate limited: `/health`, `/ready` (unauthenticated infrastructure endpoints), and
+`POST /v1/evaluations/jobs` (internal, worker-only, authenticated by
+`X-Vigil-Internal-Token` -- a single trusted caller on a fixed polling cadence has no
+customer-abuse threat model to defend against).
+
+Exceeding a limit returns `429` with `Retry-After: <N>` (whole seconds) and a body of
+`{"detail": "Rate limit exceeded. Retry after N seconds."}` -- `packages/sdk-python`'s `Vigil`
+client already retries this exact shape with backoff (see its own README's "Retries" section).
+
+**In-process, not distributed.** Rate-limit state lives in this one `api` process's memory, keyed
+by API key, bounded to at most `VIGIL_API_RATE_LIMIT_MAX_TRACKED_API_KEYS` concurrently-tracked
+keys (least-recently-used evicted beyond that). Today's production topology
+(`infrastructure/docker-compose.prod.yml`) runs exactly one `api` replica, so this is a real,
+correctly-enforced limit -- but if `api` is ever horizontally scaled to multiple replicas, each
+replica enforces its own independent budget (the effective limit becomes roughly
+`configured_limit * replica_count`). Revisiting this design (a shared store) would be necessary at
+that point; not needed today.
+
+## CORS
+
+Deny-by-default: `VIGIL_API_CORS_ALLOWED_ORIGINS` is empty by default, so no cross-origin browser
+request ever receives an `Access-Control-Allow-Origin` header. This is a deliberate default, not a
+gap -- this API's only real consumers today are `packages/sdk-python` (a non-browser HTTP client;
+CORS is a browser-only enforcement mechanism and doesn't apply to it at all) and
+`apps/dashboard`'s own server process, which calls this API directly server-to-server
+(`apps/dashboard/lib/api/vigilClient.ts`) and never exposes it to browser JS. There is no current
+consumer CORS needs to accommodate.
+
+If a browser-based consumer is ever introduced, set `VIGIL_API_CORS_ALLOWED_ORIGINS` to a
+comma-separated list of exact origins (e.g.
+`https://app.example.com,https://admin.example.com`). `allow_credentials` is always `false` --
+this API authenticates via `Authorization: Bearer <api-key>`, never cookies, so credentialed CORS
+has no purpose here. Allowed methods/headers are scoped to exactly what this API's routes use
+(`GET`/`POST`/`PUT`, `Authorization`/`Content-Type`), not wildcarded. A literal `*` in
+`VIGIL_API_CORS_ALLOWED_ORIGINS` is rejected at startup (`app.config.Settings.
+cors_allowed_origins_list` raises) -- wildcard CORS is not supported by this API at all, even if
+manually typed into the environment.
+
+See `docs/decisions/007-cors-and-dashboard-security-headers.md` for the full rationale.
+
+## Provisioning
+
+`POST /v1/provisioning/bootstrap` (Phase 4D, F3; extended in Phase 4D F1) is the production,
+HTTP-based equivalent of `scripts/seed_local_api_key.py`: a one-time way to create the first
+organization, project, API key, and dashboard owner user in a deployment where an operator may
+not have (or want) direct database access. It is **bootstrap provisioning for a single trusted
+operator, not a public signup system** — this is the *only* place a dashboard user can ever be
+created; there is no separate signup endpoint, and dashboard login itself
+(`POST /v1/auth/login`, see "Dashboard authentication" below) never creates one either.
+
+### Enabling it
+
+The endpoint is disabled by default and returns `401` for every request until an operator
+explicitly opts in. Set a real, high-entropy secret **only in the specific environment you are
+about to bootstrap, for as long as you need it**:
+
+```bash
+# 1. Generate a secret.
+openssl rand -hex 32
+
+# 2. Add it to infrastructure/.env.production (never commit this file):
+#      VIGIL_API_BOOTSTRAP_SECRET=<generated-secret>
+# 3. Recreate just the api container so it picks up the new value:
+docker compose -f infrastructure/docker-compose.prod.yml \
+  --env-file infrastructure/.env.production up -d api
+
+# 4. Call the endpoint (see "Calling it" below).
+
+# 5. Remove VIGIL_API_BOOTSTRAP_SECRET from infrastructure/.env.production again,
+#    then recreate api once more so bootstrap goes back to disabled:
+docker compose -f infrastructure/docker-compose.prod.yml \
+  --env-file infrastructure/.env.production up -d api
+```
+
+Never commit a real value — `apps/api/.env.example`'s own `VIGIL_API_BOOTSTRAP_SECRET=` line is
+deliberately empty and must stay that way.
+
+### Calling it
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/provisioning/bootstrap \
+  -H "X-Vigil-Bootstrap-Token: <the secret from above>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "organization_name": "Acme Corp",
+    "organization_slug": "acme-corp",
+    "project_name": "Production",
+    "project_slug": "production",
+    "api_key_name": "Production key",
+    "owner_email": "you@acme.example",
+    "owner_full_name": "Ada Lovelace",
+    "owner_password": "<a real password, at least 12 characters>"
+  }'
+```
+
+On success (`201`), the response contains `organization_id`, `project_id`, `api_key_id`,
+`api_key`, `user_id`, and `owner_email`. `api_key` is the plaintext key, **shown exactly once and
+never retrievable again** (only its SHA-256 hash is ever persisted, identically to
+`scripts/seed_local_api_key.py`'s own key issuance) — copy it immediately.
+`owner_password` is **not** included anywhere in the response (you already know it, having just
+chosen it) — only its `scrypt` hash is persisted, on the new `users` row. Log into the dashboard
+with `owner_email`/`owner_password` via its `/login` page (`POST /v1/auth/login` underneath) —
+see "Dashboard authentication" below.
+
+### Repeated calls
+
+Bootstrap succeeds **at most once per deployment** — a second call, whether sent later or
+concurrently with the first, always receives `409 Conflict` and creates nothing. This is enforced
+by the database in two layers, not merely an application-level check: (1) `organizations` being
+non-empty is checked first, before anything else, and alone refuses any repeat call; (2) an
+atomic, conflict-checked insert against a dedicated single-row table (`provisioning_bootstrap`)
+is what makes a *successful* run safe even when two bootstrap requests genuinely race with each
+other. See `app/services/provisioning.py`'s module docstring for the full argument.
+
+**There is no "just delete a row" way to re-enable bootstrap, and none should ever be
+documented as one.** `provisioning_bootstrap` is an audit record, not the only gate — deleting
+only that row does **not** delete the organization/project/API key it points to, so bootstrap
+would still refuse (layer (1) above still sees the organization). Re-enabling bootstrap requires
+a full, destructive teardown of everything the original run created:
+
+```sql
+-- 1. Find the organization bootstrap created, and its owner user.
+SELECT organization_id FROM provisioning_bootstrap WHERE id = 'bootstrap';
+SELECT user_id FROM organization_memberships WHERE organization_id = '<org-id>';
+
+-- 2. Substitute those UUIDs for <org-id>/<user-id> below and run as ONE
+--    transaction, in exactly this order (api_keys/projects reference
+--    organizations with ondelete=RESTRICT, so this order is required, not
+--    just convention).
+--
+--    DESTRUCTIVE. Irrecoverably deletes the organization, its project(s),
+--    its API key(s), its owner user, and that user's dashboard
+--    sessions/memberships. This is an operator-level, disposable
+--    development/staging procedure -- NEVER run this against a production
+--    deployment holding real data, and never expose it through any API.
+BEGIN;
+DELETE FROM api_keys WHERE project_id IN (SELECT id FROM projects WHERE organization_id = '<org-id>');
+DELETE FROM projects WHERE organization_id = '<org-id>';
+DELETE FROM provisioning_bootstrap WHERE id = 'bootstrap';
+DELETE FROM organization_memberships WHERE organization_id = '<org-id>';
+DELETE FROM organizations WHERE id = '<org-id>';
+DELETE FROM dashboard_sessions WHERE user_id = '<user-id>';
+DELETE FROM users WHERE id = '<user-id>';
+COMMIT;
+```
+
+After this, `organizations` is empty again (assuming it held only the bootstrapped org) and
+`POST /v1/provisioning/bootstrap` will succeed again. Note that the up-front `organizations`
+check also refuses bootstrap if *any other* organization exists in this database for any reason
+(e.g. one created by `scripts/seed_local_api_key.py`) — a full clean slate means that table is
+empty, not just that this one organization is gone.
+
+### Rotating or revoking the resulting key
+
+There is no HTTP endpoint for this yet — use direct database access, the same way
+`scripts/seed_local_api_key.py`-issued keys are managed today:
+
+```sql
+UPDATE api_keys SET status = 'revoked', revoked_at = now() WHERE id = '<api_key_id>';
+```
+
+Minting a replacement key today also means direct database access (insert a new `api_keys` row
+via `scripts/seed_local_api_key.py`'s pattern, or `psql`) — an HTTP key-management endpoint is
+tracked as a known gap, not solved by this phase.
+
+### Security limitations, explicitly
+
+This is a minimal bootstrap mechanism, not a complete provisioning/identity system:
+
+- It authenticates via a single shared secret (`X-Vigil-Bootstrap-Token`, compared with
+  `hmac.compare_digest`), not per-operator credentials — anyone with the secret can bootstrap.
+- It rate-limits by client IP (`VIGIL_API_BOOTSTRAP_RATE_LIMIT_*`, in-process, no Redis) to slow
+  brute-forcing the secret, not to prevent it outright — use a real, high-entropy secret.
+- It creates exactly one dashboard user, as the organization's `owner` — there is no invite/signup
+  flow to add a second one yet; see "Dashboard authentication" below for what login itself
+  supports today.
+- It never accepts a customer `vgl_*` API key as authorization, and a customer key can never
+  provision additional organizations/projects/keys through it.
+
+## Dashboard authentication
+
+`POST /v1/auth/login`, `POST /v1/auth/logout`, and `GET /v1/auth/session` (Phase 4D, F1)
+authenticate a human logging into `apps/dashboard`, entirely separate from customer API-key
+authentication above — a `vgl_*` key satisfies neither of these endpoints, and login credentials
+satisfy neither of the `vgl_*`-key-protected endpoints. There is no signup endpoint; the only user
+ever created is bootstrap's owner user (see "Provisioning" above).
+
+- **`POST /v1/auth/login`** — `{"email": ..., "password": ...}`. On success (`200`), returns
+  `{"session_token": ..., "expires_at": ...}` — the raw session token, shown exactly once (only
+  its SHA-256 hash is persisted, on `dashboard_sessions`). On any failure — unknown email, wrong
+  password, an inactive account, or a user with no organization membership — returns the
+  identical generic `401 {"detail": "Invalid email or password."}`, deliberately never revealing
+  which. Rate-limited by client IP (`VIGIL_API_LOGIN_RATE_LIMIT_*`, in-process, no Redis — the
+  same `RateLimiter` primitive bootstrap uses, a separate, more generous tier).
+- **`GET /v1/auth/session`** — presents the raw token via the `X-Vigil-Session-Token` header
+  (never `Authorization: Bearer`, never a query parameter). Returns `200` with the session's
+  owning user if the token is valid, unexpired, unrevoked, and its user is still active; a
+  generic `401 {"detail": "Invalid or expired session."}` otherwise. `apps/dashboard`'s own proxy
+  calls this on every request to a gated route — there is no caching layer in front of it on
+  either side, so a revoked session is rejected on its very next request.
+- **`POST /v1/auth/logout`** — same `X-Vigil-Session-Token` header. Revokes the matching session
+  (sets `revoked_at`) and always returns `204`, even for a missing/unknown/already-revoked token
+  — idempotent by design, so a client never needs special handling for "log out when maybe
+  already logged out."
+
+Session lifetime defaults to 12 hours (`VIGIL_API_DASHBOARD_SESSION_TTL_HOURS`), with no sliding
+renewal in this phase — a session simply expires at `expires_at` regardless of activity, and the
+dashboard redirects to `/login` again.
+
+Password hashing uses `hashlib.scrypt` (Python stdlib, RFC 7914's interactive-login parameters)
+— never the fast SHA-256 this codebase uses for API keys/session tokens, which are
+server-generated high-entropy secrets, not human-chosen ones. See
+`app/security/passwords.py`/`app/security/sessions.py`.
+
+## Logging
+
+Structured (JSON Lines) logging on stdout -- one JSON object per line, every field a genuine
+top-level key (`timestamp`, `level`, `service`, `logger`, `message`, plus request-scoped fields
+like `request_id`/`project_id` where relevant) rather than text embedded in a message string. See
+`app/logging_config.py`'s module docstring for the full design.
+
+`VIGIL_API_LOG_LEVEL` (default `INFO`) controls the root logger level; one of
+`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` -- anything else fails at startup.
+
+Every HTTP request gets a `request_id` (`app.middleware.RequestIdMiddleware`, always minted
+server-side, never trusted from a client-supplied header), bound for the lifetime of that request
+so every log line emitted anywhere in its call stack carries it automatically, and echoed back as
+an `X-Request-Id` response header. `POST /v1/traces`'s own `request_id` response field is this
+same value.
+
+**Local development sees the identical JSON output production does** -- deliberately not a second,
+prettier console formatter, so there is only one code path to verify. Pipe through `jq` for a
+readable view:
+
+```bash
+uv run uvicorn app.main:app --reload | jq .
+```
+
+**Never logged**: API keys, bearer tokens, the internal service token, database URLs, or raw span
+input/output/attributes. Every call site's `extra={...}` is limited to identifiers (request/
+project/trace/span ids, evaluator name/version, counts, error type names) -- see
+`app/logging_config.py`'s security note.
 
 ## Run tests
 

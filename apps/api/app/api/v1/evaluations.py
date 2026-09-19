@@ -3,23 +3,29 @@
 `POST /v1/evaluations/jobs` -- the internal, worker-only evaluation-job
 creation endpoint (ADR 005 sections 9/10, Phase 3H amendment) -- is
 authenticated by `get_internal_service_auth` (`X-Vigil-Internal-Token`),
-never `get_current_api_key`; structurally separate from every other route in
+never a customer API key; structurally separate from every other route in
 this file, which is customer-facing (Phase 3I, ADR 005 section 4's
 still-owed "evaluator_configs CRUD endpoints" and "job-status and
-evaluation-results read endpoints"). Every route here is thin, matching
-`traces.py`'s own layering: authentication -> validation (schema) ->
-`app.services.evaluations` -> status-code mapping. No ClickHouse query or
-business logic lives in this module.
+evaluation-results read endpoints") and, as of Phase 4C, additionally
+rate-limited via `app.api.rate_limit.require_default_rate_limit` (which
+itself still resolves the same `AuthenticatedKey` `get_current_api_key`
+always has -- this endpoint is not exempted from authentication, only from
+customer-style rate limiting, which has no meaning for a single trusted
+internal caller). Every route here is thin, matching `traces.py`'s own
+layering: authentication (+ rate limiting, customer routes only) ->
+validation (schema) -> `app.services.evaluations` -> status-code mapping.
+No ClickHouse query or business logic lives in this module.
 """
 
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import AuthenticatedKey, get_current_api_key, get_internal_service_auth
+from app.api.deps import AuthenticatedKey, get_internal_service_auth
+from app.api.rate_limit import require_default_rate_limit
 from app.api.v1.traces import get_traces_query_repository
 from app.clickhouse.client import get_clickhouse_client
 from app.clickhouse.evaluations_query_repository import EvaluationsQueryRepository
@@ -35,6 +41,7 @@ from app.schemas.evaluations import (
     EvaluatorConfigListResponse,
     EvaluatorConfigOut,
     EvaluatorConfigUpsertRequest,
+    EvaluatorName,
     SpanEvaluationsResponse,
 )
 from app.schemas.query import SpanId, TraceId
@@ -95,13 +102,33 @@ def create_job(
             evaluator_version=payload.evaluator_version,
         )
     except ClickHouseUnavailableError as exc:
-        logger.error("clickhouse unavailable during evaluation job creation: %s", exc)
+        logger.error(
+            "ClickHouse unavailable during evaluation job creation",
+            extra={
+                "project_id": str(payload.project_id),
+                "trace_id": payload.trace_id,
+                "span_id": payload.span_id,
+                "evaluator_name": payload.evaluator_name,
+                "evaluator_version": payload.evaluator_version,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage is temporarily unavailable. Please retry.",
         ) from exc
     except ClickHouseQueryError as exc:
-        logger.error("clickhouse rejected query during evaluation job creation: %s", exc)
+        logger.error(
+            "ClickHouse rejected query during evaluation job creation",
+            extra={
+                "project_id": str(payload.project_id),
+                "trace_id": payload.trace_id,
+                "span_id": payload.span_id,
+                "evaluator_name": payload.evaluator_name,
+                "evaluator_version": payload.evaluator_version,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to verify span.",
@@ -134,10 +161,13 @@ def create_job(
         "10). An evaluator with no row here has never been configured, "
         "distinct from an explicit enabled=false row."
     ),
-    responses={401: {"description": "Missing, malformed, unknown, or revoked API key."}},
+    responses={
+        401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
+    },
 )
 def list_evaluator_configs_endpoint(
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     db: Session = Depends(get_db),
 ) -> EvaluatorConfigListResponse:
     return list_evaluator_configs_response(db, project_id=auth.project_id)
@@ -155,12 +185,13 @@ def list_evaluator_configs_endpoint(
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         404: {"description": "This evaluator has never been configured for this project."},
     },
 )
 def get_evaluator_config_endpoint(
-    evaluator_name: str = Path(min_length=1),
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    evaluator_name: EvaluatorName,
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     db: Session = Depends(get_db),
 ) -> EvaluatorConfigOut:
     result = get_evaluator_config_response(
@@ -192,6 +223,7 @@ def get_evaluator_config_endpoint(
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         422: {
             "description": (
                 "Invalid evaluator_name, sampling_rate outside [0, 1], or negative max_retries."
@@ -201,8 +233,8 @@ def get_evaluator_config_endpoint(
 )
 def upsert_evaluator_config_endpoint(
     payload: EvaluatorConfigUpsertRequest,
-    evaluator_name: str = Path(min_length=1),
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    evaluator_name: EvaluatorName,
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     db: Session = Depends(get_db),
 ) -> EvaluatorConfigOut:
     return upsert_evaluator_config_response(
@@ -233,6 +265,7 @@ def upsert_evaluator_config_endpoint(
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         422: {"description": "Malformed cursor."},
     },
 )
@@ -240,12 +273,12 @@ def list_evaluation_jobs_endpoint(
     status_filter: EvaluationJobStatus | None = Query(
         default=None, alias="status", description="Exact match on job status."
     ),
-    evaluator_name: str | None = Query(default=None),
+    evaluator_name: EvaluatorName | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     cursor: str | None = Query(
         default=None, description="Opaque next_cursor from a prior response."
     ),
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     db: Session = Depends(get_db),
 ) -> EvaluationJobListResponse:
     try:
@@ -284,6 +317,7 @@ def list_evaluation_jobs_endpoint(
     ),
     responses={
         401: {"description": "Missing, malformed, unknown, or revoked API key."},
+        429: {"description": "Rate limit exceeded for this API key. See the Retry-After header."},
         422: {"description": "Malformed trace_id or span_id."},
         503: {"description": "ClickHouse is temporarily unavailable; safe to retry."},
     },
@@ -291,7 +325,7 @@ def list_evaluation_jobs_endpoint(
 def list_span_evaluations_endpoint(
     trace_id: TraceId,
     span_id: SpanId,
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(require_default_rate_limit),
     repository: EvaluationsQueryRepository = Depends(get_evaluations_query_repository),
 ) -> SpanEvaluationsResponse:
     try:
@@ -299,13 +333,29 @@ def list_span_evaluations_endpoint(
             repository, project_id=auth.project_id, trace_id=trace_id, span_id=span_id
         )
     except ClickHouseUnavailableError as exc:
-        logger.error("clickhouse unavailable during span evaluations lookup: %s", exc)
+        logger.error(
+            "ClickHouse unavailable during span evaluations lookup",
+            extra={
+                "project_id": str(auth.project_id),
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telemetry storage is temporarily unavailable. Please retry.",
         ) from exc
     except ClickHouseQueryError as exc:
-        logger.error("clickhouse query failed during span evaluations lookup: %s", exc)
+        logger.error(
+            "ClickHouse query failed during span evaluations lookup",
+            extra={
+                "project_id": str(auth.project_id),
+                "trace_id": trace_id,
+                "span_id": span_id,
+                "error": str(exc),
+            },
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to query evaluation results.",

@@ -159,5 +159,13 @@ def reap_stuck_jobs(
             # transient PostgreSQL error on this specific UPDATE) must never
             # abort the rest of the batch; the row is simply left `running`
             # and will be picked up again on the reaper's next tick.
-            logger.exception("Failed to reap stuck job %s", stuck_job.id)
+            logger.exception(
+                "Failed to reap stuck job %s",
+                stuck_job.id,
+                extra={
+                    "job_id": str(stuck_job.id),
+                    "claimed_by": stuck_job.claimed_by,
+                    "attempt_count": stuck_job.attempt_count,
+                },
+            )
     return outcomes

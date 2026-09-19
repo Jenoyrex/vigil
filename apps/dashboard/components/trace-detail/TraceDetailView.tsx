@@ -70,7 +70,7 @@ export function TraceDetailView({ trace }: { trace: TraceDetailResponse }) {
             {fallbackError ? (
               <ErrorBanner message={fallbackError} />
             ) : selectedSpan ? (
-              <SpanDetailPanel span={selectedSpan} />
+              <SpanDetailPanel traceId={trace.trace_id} span={selectedSpan} />
             ) : (
               <p className="text-sm text-muted">Select a span to view its details.</p>
             )}

@@ -200,6 +200,100 @@ export interface LlmUsageParams {
   group_by?: LlmGroupBy;
 }
 
+// -- Evaluations: config CRUD (apps/api/app/schemas/evaluations.py) ---------
+//
+// Mirrors that module's customer-facing schemas exactly (everything except
+// EvaluationJobCreateRequest/Response, which is the internal-token-only
+// worker endpoint this dashboard never calls).
+
+export interface EvaluatorConfigOut {
+  evaluator_name: string;
+  enabled: boolean;
+  sampling_rate: number;
+  threshold: number | null;
+  max_retries: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EvaluatorConfigListResponse {
+  configs: EvaluatorConfigOut[];
+}
+
+/**
+ * Body for `PUT /v1/evaluations/configs/{evaluator_name}`. The API applies
+ * full-replace (PUT, not PATCH) semantics -- an omitted field resolves to
+ * its own documented default there, never to whatever a prior PUT left it
+ * at -- so every caller in this app always sends the complete object
+ * (`EvaluatorConfigForm` never omits a field), even though each field here
+ * is technically optional to match the API's own request shape.
+ */
+export interface EvaluatorConfigUpsertRequest {
+  enabled: boolean;
+  sampling_rate?: number;
+  threshold?: number | null;
+  max_retries?: number;
+}
+
+// -- Evaluations: job status list (GET /v1/evaluations/jobs) ----------------
+
+export type EvaluationJobStatus = "pending" | "running" | "succeeded" | "failed" | "dead_letter";
+
+export interface EvaluationJobOut {
+  id: string;
+  trace_id: string;
+  span_id: string;
+  evaluator_name: string;
+  evaluator_version: string;
+  status: EvaluationJobStatus;
+  attempt_count: number;
+  max_retries: number;
+  next_attempt_at: string | null;
+  claimed_at: string | null;
+  claimed_by: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EvaluationJobListResponse {
+  jobs: EvaluationJobOut[];
+  next_cursor: string | null;
+}
+
+export interface EvaluationJobListParams {
+  [key: string]: string | number | boolean | undefined;
+  status?: EvaluationJobStatus;
+  evaluator_name?: string;
+  limit?: number;
+  cursor?: string;
+}
+
+// -- Evaluations: span-scoped results (GET .../spans/{span_id}/evaluations) -
+
+export interface EvaluationResultOut {
+  evaluation_id: string;
+  trace_id: string;
+  span_id: string;
+  evaluator_name: string;
+  evaluator_version: string;
+  score: number | null;
+  label: string;
+  explanation: string;
+  evaluator_model: string | null;
+  evaluator_provider: string | null;
+  evaluation_latency_ms: number;
+  /** Decimal string, e.g. "0.000340" -- never parse to a number here (same
+   * rule as `SpanOut.llm_cost_usd` above). */
+  evaluation_cost_usd: string | null;
+  job_created_at: string;
+  written_at: string;
+}
+
+export interface SpanEvaluationsResponse {
+  results: EvaluationResultOut[];
+}
+
 // -- Error shape --------------------------------------------------------
 
 /** One item of FastAPI's automatic Pydantic validation-error format. */

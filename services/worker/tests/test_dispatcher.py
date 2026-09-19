@@ -23,6 +23,7 @@ injection still works unchanged under the new resource-ownership boundary.
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from contextlib import nullcontext
 from datetime import UTC, datetime
@@ -36,6 +37,7 @@ from worker.dispatcher import Dispatcher, DispatchOutcome
 from worker.postgres.repository import ClaimedJob
 from worker.registry import EvaluatorRegistry
 from worker.resources import ExecutionResources
+from worker.timeouts import EvaluatorTimeoutError
 
 PROJECT_ID = uuid.uuid4()
 CREATED_AT = datetime(2026, 9, 9, 12, 0, 0, tzinfo=UTC)
@@ -150,7 +152,11 @@ def _span(text: str) -> dict:
 
 
 def _make_dispatcher(
-    *, max_concurrent_evaluations: int, evaluator: FakeEvaluator, spans: dict[str, dict]
+    *,
+    max_concurrent_evaluations: int,
+    evaluator: FakeEvaluator,
+    spans: dict[str, dict],
+    evaluator_call_timeout_seconds: float | None = None,
 ) -> tuple[Dispatcher, FakeResultsRepository, FakeJobsRepository]:
     results_repository = FakeResultsRepository()
     jobs_repository = FakeJobsRepository()
@@ -160,10 +166,14 @@ def _make_dispatcher(
         results_repository=results_repository,
         jobs_repository=jobs_repository,
     )
+    kwargs = {}
+    if evaluator_call_timeout_seconds is not None:
+        kwargs["evaluator_call_timeout_seconds"] = evaluator_call_timeout_seconds
     dispatcher = Dispatcher(
         max_concurrent_evaluations=max_concurrent_evaluations,
         registry=EvaluatorRegistry(evaluators=[evaluator]),
         resource_provider=lambda: nullcontext(resources),
+        **kwargs,
     )
     return dispatcher, results_repository, jobs_repository
 
@@ -518,3 +528,151 @@ def test_never_more_than_the_configured_limit_run_simultaneously() -> None:
 
     assert all(outcome.succeeded for outcome in outcomes)
     assert peak == max_concurrent
+
+
+# -- evaluator call timeout (Phase 4A) ----------------------------------------
+
+
+class HangingEvaluator:
+    """An `Evaluator` test double whose `evaluate()` blocks on a
+    `threading.Event` the test controls -- never a real, unbounded hang."""
+
+    name = "hanging_evaluator"
+    version = "0.1.0"
+
+    def __init__(self, release: threading.Event) -> None:
+        self._release = release
+
+    def evaluate(
+        self, evaluator_input: RelevanceEvaluatorInput, *, threshold: float | None = None
+    ) -> EvaluationResult:
+        self._release.wait(timeout=10.0)
+        return EvaluationResult(
+            evaluator_name=self.name,
+            evaluator_version=self.version,
+            score=0.9,
+            label="relevant",
+            explanation="fake",
+            evaluation_latency_ms=1.0,
+            evaluation_cost_usd=None,
+            evaluator_model="fake-model",
+            evaluator_provider=None,
+        )
+
+
+def test_dispatch_returns_within_bounded_time_when_the_evaluator_hangs() -> None:
+    """The actual regression this item exists to fix: one hung `evaluate()`
+    call must never wedge `Dispatcher.dispatch()` -- it must return
+    (raising nothing itself; the hang becomes a per-job `DispatchOutcome.error`
+    instead) within roughly `evaluator_call_timeout_seconds`, never for
+    however long the hung call actually keeps running."""
+    release = threading.Event()  # deliberately never set within this test's
+    # own bounded window -- proving dispatch() doesn't wait for it regardless.
+    evaluator = HangingEvaluator(release)
+    job = _job(span_id="span-hang", evaluator_name=evaluator.name)
+    spans = {job.span_id: _span(job.span_id)}
+    dispatcher, _, _ = _make_dispatcher(
+        max_concurrent_evaluations=1,
+        evaluator=evaluator,
+        spans=spans,
+        evaluator_call_timeout_seconds=0.05,
+    )
+
+    started = time.monotonic()
+    try:
+        outcomes = dispatcher.dispatch([job])
+        elapsed = time.monotonic() - started
+        assert elapsed < 2.0, "dispatch() must not block on a hung evaluator call"
+        assert len(outcomes) == 1
+    finally:
+        release.set()
+
+
+def test_evaluator_timeout_becomes_the_dispatch_outcomes_error() -> None:
+    release = threading.Event()
+    evaluator = HangingEvaluator(release)
+    job = _job(span_id="span-hang", evaluator_name=evaluator.name)
+    spans = {job.span_id: _span(job.span_id)}
+    dispatcher, _, _ = _make_dispatcher(
+        max_concurrent_evaluations=1,
+        evaluator=evaluator,
+        spans=spans,
+        evaluator_call_timeout_seconds=0.05,
+    )
+
+    try:
+        [outcome] = dispatcher.dispatch([job])
+    finally:
+        release.set()
+
+    assert not outcome.succeeded
+    assert isinstance(outcome.error, EvaluatorTimeoutError)
+
+
+def test_evaluator_timeout_invokes_the_existing_failure_handler() -> None:
+    """A timeout must be classified and recorded by the unmodified
+    `worker.failure_handling` machinery, exactly like any other failure --
+    no new classification code for this exception type."""
+    release = threading.Event()
+    evaluator = HangingEvaluator(release)
+    job = _job(span_id="span-hang", evaluator_name=evaluator.name, attempt_count=1)
+    spans = {job.span_id: _span(job.span_id)}
+    dispatcher, _, jobs_repository = _make_dispatcher(
+        max_concurrent_evaluations=1,
+        evaluator=evaluator,
+        spans=spans,
+        evaluator_call_timeout_seconds=0.05,
+    )
+
+    try:
+        [outcome] = dispatcher.dispatch([job])
+    finally:
+        release.set()
+
+    # attempt_count (1) < max_retries (3) -- retryable, not exhausted:
+    # mark_failed, not mark_dead_letter.
+    assert outcome.failure_handling is not None
+    assert outcome.failure_handling.new_status == "failed"
+    jobs_repository.mark_failed.assert_called_once()
+    jobs_repository.mark_dead_letter.assert_not_called()
+
+
+def test_a_sibling_fast_job_still_succeeds_despite_another_job_hanging() -> None:
+    """The hang must not starve or corrupt any other concurrently-dispatched
+    job in the same batch."""
+    release = threading.Event()
+    hanging_evaluator = HangingEvaluator(release)
+    fast_evaluator = FakeEvaluator()
+
+    hang_job = _job(span_id="span-hang", evaluator_name=hanging_evaluator.name)
+    fast_job = _job(span_id="span-fast", evaluator_name=fast_evaluator.name)
+    spans = {
+        hang_job.span_id: _span(hang_job.span_id),
+        fast_job.span_id: _span(fast_job.span_id),
+    }
+
+    results_repository = FakeResultsRepository()
+    jobs_repository = FakeJobsRepository()
+    resources = ExecutionResources(
+        span_repository=FakeSpanRepository(spans),
+        evaluator_config_repository=FakeEvaluatorConfigRepository(),
+        results_repository=results_repository,
+        jobs_repository=jobs_repository,
+    )
+    registry = EvaluatorRegistry(evaluators=[hanging_evaluator, fast_evaluator])
+    dispatcher = Dispatcher(
+        max_concurrent_evaluations=2,
+        registry=registry,
+        resource_provider=lambda: nullcontext(resources),
+        evaluator_call_timeout_seconds=0.05,
+    )
+
+    try:
+        outcomes = dispatcher.dispatch([hang_job, fast_job])
+    finally:
+        release.set()
+
+    outcomes_by_span_id = {outcome.job.span_id: outcome for outcome in outcomes}
+    assert not outcomes_by_span_id["span-hang"].succeeded
+    assert outcomes_by_span_id["span-fast"].succeeded
+    assert len(jobs_repository.mark_succeeded_calls) == 1

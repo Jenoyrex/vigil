@@ -100,6 +100,36 @@ corresponding `evaluation_jobs.id` (PostgreSQL) through verbatim. This is what g
 result row and its owning PostgreSQL job row a stable, application-level shared identity across the
 two stores, per ADR 005's Phase 2 decision.
 
+## Logging
+
+Structured (JSON Lines) logging on stdout -- one JSON object per line, every field a genuine
+top-level key (`timestamp`, `level`, `service`, `logger`, `message`, plus fields like `worker_id`/
+`job_id`/`project_id`/`evaluator_name` where relevant) rather than text embedded in a message
+string. See `worker/logging_config.py`'s module docstring for the full design.
+
+`VIGIL_WORKER_LOG_LEVEL` (default `INFO`, shared by both `worker` and `poller`) controls the root
+logger level; one of `DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL` -- anything else fails at startup.
+`service` distinguishes the two processes in their JSON output (`"worker"` vs. `"poller"`) even
+though they share one image/package (`services/worker/Dockerfile`).
+
+`worker_id` (`worker.runtime.generate_worker_id`, `hostname:pid:short-uuid`, one per process) is
+attached via `extra={...}` at each relevant `worker/runtime.py` call site -- deliberately not an
+auto-injecting contextvar the way `apps/api` does for `request_id`, since job execution runs on a
+plain `ThreadPoolExecutor` (`worker/dispatcher.py`), which does not propagate a context variable
+set on the submitting thread into pool worker threads.
+
+**Local development sees the identical JSON output production does** -- deliberately not a second,
+prettier console formatter. Pipe through `jq` for a readable view:
+
+```bash
+uv run python -m worker | jq .
+```
+
+**Never logged**: the internal service token, database URLs, or raw span/evaluation input/output
+content. Every call site's `extra={...}` is limited to identifiers (worker/job/project/trace/span
+ids, evaluator name/version, counts, error type names) -- see `worker/logging_config.py`'s security
+note.
+
 ## Tests
 
 ```bash

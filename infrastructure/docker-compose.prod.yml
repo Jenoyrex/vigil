@@ -1,0 +1,234 @@
+# Production deployment topology for the complete Vigil platform (Phase 4B).
+# Deliberately independent of infrastructure/docker-compose.yml (local
+# development datastores only) -- that file is unchanged and this one does
+# not extend or override it, so local dev workflow is unaffected. See
+# docs/decisions/006-deployment-architecture.md for the full rationale
+# behind every decision encoded here.
+#
+# Every application service (migrate/api/dashboard/worker/poller) declares
+# BOTH `image:` and `build:` (Phase 4D, F7). `image:` is a required
+# (`${VAR:?...}`), env-var-driven GHCR reference with no `latest`/branch
+# fallback, so a value must always be supplied explicitly -- see
+# infrastructure/.env.production.example. `build:` is kept, unchanged, for
+# local/manual building. These two modes are NOT safely interchangeable by
+# accident: `docker compose up` without `--no-build` will silently fall back
+# to building from source the moment a named `image:` tag fails to pull
+# (verified empirically -- see docs/decisions/006-deployment-architecture.md,
+# decision 13), even with `pull_policy: always`. The only combination proven
+# to fail closed instead of silently building is `docker compose pull`
+# (never builds; hard-errors if the tag is unavailable) followed by
+# `docker compose up --no-build` (refuses to build even if the image is
+# somehow still missing). The automated deploy workflow
+# (.github/workflows/cd.yml) always uses exactly that sequence; use it too
+# for any manual registry-image deploy.
+#
+# Usage -- registry images (production; requires VIGIL_API_IMAGE,
+# VIGIL_DASHBOARD_IMAGE, VIGIL_WORKER_IMAGE set, e.g. via shell env, since
+# infrastructure/.env.production intentionally does not pin one -- see that
+# file's own comments):
+#   docker compose -f infrastructure/docker-compose.prod.yml \
+#     --env-file infrastructure/.env.production pull
+#   docker compose -f infrastructure/docker-compose.prod.yml \
+#     --env-file infrastructure/.env.production up -d --no-build
+#
+# Usage -- local build (unchanged from Phase 4B; the three image vars above
+# must still be set to *some* validly-shaped reference, even a placeholder,
+# since `image:` is a required variable, but `--build` builds and tags with
+# it locally rather than pulling it):
+#   docker compose -f infrastructure/docker-compose.prod.yml \
+#     --env-file infrastructure/.env.production up -d --build
+
+# Pinned explicitly so this file's project identity (and therefore its
+# container names, default volume names, and network name) can never
+# collide with infrastructure/docker-compose.yml's -- both files live in
+# this same directory, and without this, Compose derives the project name
+# from the directory basename for BOTH files ("infrastructure"), which
+# means this file's `postgres`/`clickhouse` would resolve to the exact same
+# container and volume names as the dev stack's and a plain `up` here would
+# recreate the dev database containers against production configuration.
+# See docs/decisions/006-deployment-architecture.md decision 5.
+name: vigil-prod
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    # No `ports:` -- unlike infrastructure/docker-compose.yml's local dev
+    # setup, PostgreSQL is reachable only from other containers on this
+    # Compose network, never published to the host.
+    volumes:
+      - vigil_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+    # No `ports:` -- same reasoning as postgres above.
+    volumes:
+      - vigil_clickhouse_data:/var/lib/clickhouse
+      # Same schema-provisioning init scripts as local dev
+      # (infrastructure/docker-compose.yml) -- there is no Alembic
+      # equivalent for ClickHouse, so this mount is the only mechanism
+      # that creates the `spans`/`evaluation_results` tables on first
+      # boot, in production exactly as in local development.
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot schema migration, run to completion before `api` starts.
+  # Reuses the api image unchanged (same app.config.settings-driven
+  # alembic/env.py, see apps/api/alembic/env.py) rather than baking
+  # `alembic upgrade head` into api's own container startup, so migrations
+  # never race across multiple api replicas and a failed migration is
+  # immediately visible as this service's own non-zero exit rather than a
+  # silently-degraded api container.
+  migrate:
+    image: ${VIGIL_API_IMAGE:?Set VIGIL_API_IMAGE (e.g. ghcr.io/<owner>/vigil-api:sha-<commit>) -- see infrastructure/.env.production.example}
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    restart: "no"
+    # python -m alembic, not the `alembic` console-script wrapper -- see
+    # apps/api/Dockerfile's CMD comment for why (broken shebang across the
+    # builder/runtime stage boundary).
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment:
+      VIGIL_API_DATABASE_URL: ${VIGIL_API_DATABASE_URL}
+      VIGIL_API_CLICKHOUSE_HOST: ${VIGIL_API_CLICKHOUSE_HOST}
+      VIGIL_API_CLICKHOUSE_PORT: ${VIGIL_API_CLICKHOUSE_PORT}
+      VIGIL_API_CLICKHOUSE_DATABASE: ${VIGIL_API_CLICKHOUSE_DATABASE}
+      VIGIL_API_CLICKHOUSE_USER: ${VIGIL_API_CLICKHOUSE_USER}
+      VIGIL_API_CLICKHOUSE_PASSWORD: ${VIGIL_API_CLICKHOUSE_PASSWORD}
+      VIGIL_API_INTERNAL_SERVICE_TOKEN: ${VIGIL_API_INTERNAL_SERVICE_TOKEN}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    image: ${VIGIL_API_IMAGE:?Set VIGIL_API_IMAGE (e.g. ghcr.io/<owner>/vigil-api:sha-<commit>) -- see infrastructure/.env.production.example}
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      VIGIL_API_DATABASE_URL: ${VIGIL_API_DATABASE_URL}
+      VIGIL_API_CLICKHOUSE_HOST: ${VIGIL_API_CLICKHOUSE_HOST}
+      VIGIL_API_CLICKHOUSE_PORT: ${VIGIL_API_CLICKHOUSE_PORT}
+      VIGIL_API_CLICKHOUSE_DATABASE: ${VIGIL_API_CLICKHOUSE_DATABASE}
+      VIGIL_API_CLICKHOUSE_USER: ${VIGIL_API_CLICKHOUSE_USER}
+      VIGIL_API_CLICKHOUSE_PASSWORD: ${VIGIL_API_CLICKHOUSE_PASSWORD}
+      VIGIL_API_INTERNAL_SERVICE_TOKEN: ${VIGIL_API_INTERNAL_SERVICE_TOKEN}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  dashboard:
+    image: ${VIGIL_DASHBOARD_IMAGE:?Set VIGIL_DASHBOARD_IMAGE (e.g. ghcr.io/<owner>/vigil-dashboard:sha-<commit>) -- see infrastructure/.env.production.example}
+    build:
+      context: ../apps/dashboard
+      dockerfile: Dockerfile
+      additional_contexts:
+        workspace: ..
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      VIGIL_API_BASE_URL: ${VIGIL_API_BASE_URL}
+      VIGIL_API_KEY: ${VIGIL_API_KEY}
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # Claim/dispatch/reap runtime loop (python -m worker). Must never start
+  # against an unmigrated schema -- gated on `migrate` completing, same as
+  # `api` -- and relies entirely on `restart: unless-stopped` as the
+  # external process supervisor Phase 4A's bounded-orphan self-retirement
+  # (services/worker/worker/runtime.py) depends on to bring a fresh,
+  # zero-orphan replacement back up after this process retires itself.
+  worker:
+    image: ${VIGIL_WORKER_IMAGE:?Set VIGIL_WORKER_IMAGE (e.g. ghcr.io/<owner>/vigil-worker:sha-<commit>) -- see infrastructure/.env.production.example}
+    build:
+      context: ../services/worker
+      dockerfile: Dockerfile
+      additional_contexts:
+        evaluator: ../services/evaluator
+    restart: unless-stopped
+    command: ["python", "-m", "worker"]
+    # No `ports:` -- this is a polling loop, not an HTTP server.
+    environment:
+      VIGIL_WORKER_DATABASE_URL: ${VIGIL_WORKER_DATABASE_URL}
+      VIGIL_WORKER_CLICKHOUSE_HOST: ${VIGIL_WORKER_CLICKHOUSE_HOST}
+      VIGIL_WORKER_CLICKHOUSE_PORT: ${VIGIL_WORKER_CLICKHOUSE_PORT}
+      VIGIL_WORKER_CLICKHOUSE_DATABASE: ${VIGIL_WORKER_CLICKHOUSE_DATABASE}
+      VIGIL_WORKER_CLICKHOUSE_USER: ${VIGIL_WORKER_CLICKHOUSE_USER}
+      VIGIL_WORKER_CLICKHOUSE_PASSWORD: ${VIGIL_WORKER_CLICKHOUSE_PASSWORD}
+      VIGIL_WORKER_INTERNAL_SERVICE_TOKEN: ${VIGIL_WORKER_INTERNAL_SERVICE_TOKEN}
+      VIGIL_WORKER_API_BASE_URL: ${VIGIL_WORKER_API_BASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Same image as `worker` (see services/worker/Dockerfile's module
+  # docstring for why this is one image with two commands, not two
+  # images), running the ClickHouse-scanning job-creation poller
+  # (python -m worker.poller_main) instead. Additionally waits on `api`
+  # being healthy -- the poller authenticates against and calls api's
+  # internal job-creation endpoint over HTTP (worker/poller.py), unlike
+  # the runtime loop above, which never talks to api at all.
+  poller:
+    image: ${VIGIL_WORKER_IMAGE:?Set VIGIL_WORKER_IMAGE (e.g. ghcr.io/<owner>/vigil-worker:sha-<commit>) -- see infrastructure/.env.production.example}
+    build:
+      context: ../services/worker
+      dockerfile: Dockerfile
+      additional_contexts:
+        evaluator: ../services/evaluator
+    restart: unless-stopped
+    command: ["python", "-m", "worker.poller_main"]
+    # No `ports:` -- this is a polling loop, not an HTTP server.
+    environment:
+      VIGIL_WORKER_DATABASE_URL: ${VIGIL_WORKER_DATABASE_URL}
+      VIGIL_WORKER_CLICKHOUSE_HOST: ${VIGIL_WORKER_CLICKHOUSE_HOST}
+      VIGIL_WORKER_CLICKHOUSE_PORT: ${VIGIL_WORKER_CLICKHOUSE_PORT}
+      VIGIL_WORKER_CLICKHOUSE_DATABASE: ${VIGIL_WORKER_CLICKHOUSE_DATABASE}
+      VIGIL_WORKER_CLICKHOUSE_USER: ${VIGIL_WORKER_CLICKHOUSE_USER}
+      VIGIL_WORKER_CLICKHOUSE_PASSWORD: ${VIGIL_WORKER_CLICKHOUSE_PASSWORD}
+      VIGIL_WORKER_INTERNAL_SERVICE_TOKEN: ${VIGIL_WORKER_INTERNAL_SERVICE_TOKEN}
+      VIGIL_WORKER_API_BASE_URL: ${VIGIL_WORKER_API_BASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+
+volumes:
+  vigil_postgres_data:
+  vigil_clickhouse_data:

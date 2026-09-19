@@ -1,3 +1,6 @@
+import logging
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -6,6 +9,26 @@ class Settings(BaseSettings):
 
     app_name: str = "Vigil API"
     database_url: str = "postgresql+psycopg://vigil:vigil@localhost:5434/vigil"
+
+    # Structured logging (Phase 4D, F4, app/logging_config.py). Standard
+    # Python logging level name -- validated below so a typo fails loudly at
+    # process start (the same posture `cors_allowed_origins_list` already
+    # takes for a dangerous misconfiguration) rather than silently falling
+    # back to WARNING, which `logging.Logger.setLevel` would otherwise do
+    # for an unrecognized string.
+    log_level: str = "INFO"
+
+    @field_validator("log_level")
+    @classmethod
+    def _validate_log_level(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        valid_levels = logging.getLevelNamesMapping()
+        if normalized not in valid_levels:
+            raise ValueError(
+                f"VIGIL_API_LOG_LEVEL={value!r} is not a valid logging level "
+                f"(expected one of {sorted(valid_levels)})."
+            )
+        return normalized
 
     # ClickHouse connection. Defaults match infrastructure/.env.example /
     # infrastructure/docker-compose.yml local development credentials.
@@ -33,6 +56,36 @@ class Settings(BaseSettings):
     default_query_window_hours: int = 24
     max_spans_per_trace_response: int = 2000
 
+    # Per-API-key in-process token-bucket rate limiting (Phase 4C), keyed by
+    # AuthenticatedKey.api_key_id -- see app/api/rate_limit.py. Two tiers:
+    # a stricter one for POST /v1/traces (the highest-volume, highest-cost
+    # write path) and a more generous one shared by every other
+    # authenticated customer endpoint. Capacity is the burst size (tokens
+    # available immediately); refill_per_second is the sustained rate once
+    # the burst is spent. These are a starting point, not load-tested
+    # production numbers -- there is no production traffic history yet to
+    # calibrate against; revisit once there is. max_tracked_api_keys bounds
+    # this process's memory to at most that many concurrently-tracked keys
+    # (least-recently-used eviction beyond that), independent of how many
+    # distinct API keys actually exist.
+    rate_limit_ingestion_capacity: int = 20
+    rate_limit_ingestion_refill_per_second: float = 5.0
+    rate_limit_default_capacity: int = 60
+    rate_limit_default_refill_per_second: float = 20.0
+    rate_limit_max_tracked_api_keys: int = 10_000
+
+    # Explicit deny-by-default CORS policy (Phase 4C) -- see docs/decisions/
+    # 007-cors-and-dashboard-security-headers.md. Empty by default: this API
+    # has no legitimate browser-based cross-origin consumer today -- the
+    # dashboard is a server-side BFF (apps/dashboard/lib/api/vigilClient.ts),
+    # never calling this API directly from browser JS -- so denying all
+    # cross-origin browser access is the correct default, not a gap to fill
+    # in later. A comma-separated list of exact origins (scheme + host +
+    # port, e.g. "https://app.example.com,https://admin.example.com"); set
+    # only if a future browser-based consumer is introduced. See
+    # `cors_allowed_origins_list` below for parsing/validation.
+    cors_allowed_origins: str = ""
+
     # Internal worker-fleet authentication (POST /v1/evaluations/jobs), per
     # docs/decisions/005-evaluation-job-storage-worker.md section 9 / Phase
     # 3H amendment. Deliberately no default -- must be supplied via
@@ -40,6 +93,82 @@ class Settings(BaseSettings):
     # never baked into source. services/worker's own Settings holds the
     # same value under its own VIGIL_WORKER_ prefix.
     internal_service_token: str
+
+    # Production provisioning/onboarding bootstrap (Phase 4D, F3) -- see
+    # app/api/v1/provisioning.py and docs/decisions/006-deployment-
+    # architecture.md. Empty by default, which `app.api.deps.
+    # get_bootstrap_auth` treats as "bootstrap is disabled": every request
+    # to `POST /v1/provisioning/bootstrap` is rejected with 401, regardless
+    # of any token presented, unless an operator explicitly sets this to a
+    # real, high-entropy secret. Deliberately no non-empty default -- unlike
+    # `internal_service_token` above (which every environment, local dev
+    # included, MUST set or the app refuses to start), bootstrap is meant to
+    # be unreachable by default and only enabled for the brief window an
+    # operator actually needs it, then unset again. Never place a real value
+    # in `.env.example`.
+    bootstrap_secret: str = ""
+
+    # In-process, IP-keyed rate limiting for POST /v1/provisioning/bootstrap
+    # (Phase 4D, F3) -- see app/api/rate_limit.py's RateLimiter (the same
+    # primitive Phase 4C's per-API-key limits use, generalized to any
+    # hashable key). Deliberately much stricter than the customer-key tiers
+    # above: this endpoint is reachable by anyone who can send it a request
+    # at all (no api_keys-table lookup gates it), its only real caller ever
+    # needs to succeed once, and the goal is to slow down brute-forcing
+    # bootstrap_secret, not to serve legitimate sustained traffic. Keyed by
+    # client IP rather than any authenticated identity, since a bootstrap
+    # request has none.
+    bootstrap_rate_limit_capacity: int = 5
+    bootstrap_rate_limit_refill_per_second: float = 0.05
+    bootstrap_rate_limit_max_tracked_ips: int = 10_000
+
+    # Dashboard user authentication (Phase 4D, F1) -- POST /v1/auth/login,
+    # POST /v1/auth/logout, GET /v1/auth/session. See
+    # app/security/passwords.py / app/security/sessions.py /
+    # app/services/auth.py. Entirely separate from customer API-key
+    # authentication above.
+    #
+    # Session lifetime: a logged-in dashboard user must re-authenticate
+    # after this many hours regardless of activity (no sliding-expiration
+    # renewal in this phase -- kept simple; revisit if that proves
+    # annoying in practice). 12 hours is a reasonable single-workday
+    # session for a small self-hosted internal tool, not a load-tested
+    # production number.
+    dashboard_session_ttl_hours: int = 12
+
+    # In-process, IP-keyed rate limiting for POST /v1/auth/login -- same
+    # `RateLimiter` primitive as the bootstrap tier above, for the identical
+    # reason: a login attempt has no authenticated identity to key on until
+    # it succeeds, so it must be keyed by client IP instead. Deliberately
+    # more generous than the bootstrap tier (bootstrap is a once-ever
+    # operator action; login is routine, and a legitimate user mistyping
+    # their password a few times must not be locked out for minutes), but
+    # still strict enough to make online password brute-forcing impractical.
+    # A starting point, not a load-tested production number.
+    login_rate_limit_capacity: int = 10
+    login_rate_limit_refill_per_second: float = 0.1
+    login_rate_limit_max_tracked_ips: int = 10_000
+
+    @property
+    def cors_allowed_origins_list(self) -> list[str]:
+        """Parsed, validated form of `cors_allowed_origins`.
+
+        Raises if `"*"` is present -- wildcard CORS is not supported by
+        this API at all, even if manually typed into the environment; list
+        exact origins instead. Raised here (accessed once, at app-startup
+        middleware configuration in app/main.py) rather than silently
+        tolerated, so a dangerous misconfiguration fails loudly at process
+        start instead of quietly granting every origin cross-origin access.
+        """
+        origins = [
+            origin.strip() for origin in self.cors_allowed_origins.split(",") if origin.strip()
+        ]
+        if "*" in origins:
+            raise ValueError(
+                "VIGIL_API_CORS_ALLOWED_ORIGINS must not contain '*' -- list exact "
+                "origins explicitly. Wildcard CORS is not supported by this API."
+            )
+        return origins
 
 
 settings = Settings()

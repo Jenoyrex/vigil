@@ -165,18 +165,24 @@ abrupt termination (a crash, `os._exit`, `SIGKILL`) can skip both.
 
 ## Retries
 
-Only failures that could plausibly succeed on a retry are retried, with bounded exponential
-backoff (`retry_backoff_base` doubling up to `retry_backoff_max`, for up to `max_retries`
-additional attempts):
+Only failures that could plausibly succeed on a retry are retried, for up to `max_retries`
+additional attempts:
 
 - network errors and timeouts,
-- HTTP `503` and any other `5xx`.
+- HTTP `429` (rate limited) and `5xx` (including `503`).
 
 These are **not** retried -- resending the identical request cannot fix them:
 
 - `401` / `403` (bad or revoked API key),
 - `422` (the payload itself is invalid),
-- any other non-`5xx` response.
+- any other non-retryable response.
+
+The retry delay itself: a `429` or `503` response's own `Retry-After` header (integer seconds), if
+present and valid, is used verbatim -- a server-specified wait is exact, not an estimate, so it is
+never adjusted further. Otherwise, the delay is bounded exponential backoff with full jitter:
+`retry_backoff_base` doubles each attempt up to `retry_backoff_max`, then the actual delay is a
+random value between `0` and that computed bound (`random.uniform(0, computed_delay)`) -- this
+keeps many clients retrying the same transient failure from all retrying in lockstep.
 
 **A retry always resends the exact same spans, with the exact same `trace_id`/`span_id` values --
 IDs are never regenerated on retry.** This is what makes retries safe: the ingestion API's

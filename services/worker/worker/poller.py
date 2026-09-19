@@ -73,6 +73,7 @@ from uuid import UUID
 import psycopg
 
 from worker.clickhouse.eligible_span_repository import EligibleSpan, EligibleSpanRepository
+from worker.heartbeat import touch_heartbeat
 from worker.postgres.poller_checkpoint_repository import PollerCheckpointRepository
 from worker.registry import EvaluatorRegistry
 
@@ -154,6 +155,12 @@ class HttpJobCreationClient:
                 "X-Vigil-Internal-Token": self._token,
             },
         )
+        extra = {
+            "project_id": str(project_id),
+            "span_id": span_id,
+            "evaluator_name": evaluator_name,
+            "evaluator_version": evaluator_version,
+        }
         try:
             with urllib.request.urlopen(request, timeout=self._timeout_seconds) as response:
                 payload = json.loads(response.read())
@@ -166,6 +173,7 @@ class HttpJobCreationClient:
                     span_id,
                     evaluator_name,
                     evaluator_version,
+                    extra=extra,
                 )
             else:
                 logger.error(
@@ -175,6 +183,7 @@ class HttpJobCreationClient:
                     span_id,
                     evaluator_name,
                     evaluator_version,
+                    extra={**extra, "status": exc.code},
                 )
             return JobCreationOutcome(resolved=False)
         except urllib.error.URLError as exc:
@@ -185,6 +194,7 @@ class HttpJobCreationClient:
                 evaluator_name,
                 evaluator_version,
                 exc,
+                extra={**extra, "error": str(exc)},
             )
             return JobCreationOutcome(resolved=False)
 
@@ -198,6 +208,7 @@ class HttpJobCreationClient:
                 span_id,
                 evaluator_name,
                 evaluator_version,
+                extra={**extra, "reason": reason},
             )
             return JobCreationOutcome(resolved=False)
 
@@ -226,6 +237,7 @@ class Poller:
         poller_overlap_seconds: float,
         poller_start_time_lookback_days: int,
         poller_interval_seconds: float,
+        heartbeat_callback: Callable[[], None] = touch_heartbeat,
     ) -> None:
         self._eligible_span_repository = eligible_span_repository
         self._checkpoint_connection_factory = checkpoint_connection_factory
@@ -235,6 +247,7 @@ class Poller:
         self._poller_overlap_seconds = poller_overlap_seconds
         self._poller_start_time_lookback_days = poller_start_time_lookback_days
         self._poller_interval_seconds = poller_interval_seconds
+        self._heartbeat_callback = heartbeat_callback
         self._stop_event = threading.Event()
 
     def request_stop(self) -> None:
@@ -249,10 +262,26 @@ class Poller:
         only works from the main thread in Python, the identical
         constraint `worker.runtime.WorkerRuntime.run` documents for the
         identical reason.
+
+        `self._heartbeat_callback()` (Phase 4D, F6 -- `worker.heartbeat
+        .touch_heartbeat` by default, the same one `WorkerRuntime.run`
+        uses and the same file `services/worker/Dockerfile`'s single
+        `HEALTHCHECK` instruction checks for both processes) is called
+        once at startup and once at the top of every loop iteration --
+        never inside `run_one_tick()` itself, so its own cost is never
+        what a shutdown check waits behind. `run_one_tick()`'s own
+        ClickHouse scan, PostgreSQL checkpoint read/write
+        (`database_timeout_seconds`), and HTTP call to apps/api
+        (`poller_job_creation_timeout_seconds`) are all already
+        individually time-bounded, so a heartbeat that stops refreshing
+        for longer than a generous multiple of those bounds is a genuine
+        stuck-loop signal.
         """
         self._install_signal_handlers()
         logger.info("evaluation job poller starting")
+        self._heartbeat_callback()
         while not self._stop_event.is_set():
+            self._heartbeat_callback()
             self.run_one_tick()
             if self._stop_event.is_set():
                 break
@@ -264,7 +293,11 @@ class Poller:
         signal.signal(signal.SIGINT, self._handle_signal)
 
     def _handle_signal(self, signum: int, frame: object) -> None:
-        logger.info("evaluation job poller received signal %s, requesting shutdown", signum)
+        logger.info(
+            "evaluation job poller received signal %s, requesting shutdown",
+            signum,
+            extra={"signal": signum},
+        )
         self.request_stop()
 
     def run_one_tick(self) -> None:
@@ -316,6 +349,7 @@ class Poller:
                 "poller tick had unresolved job-creation calls (scanned=%d); "
                 "checkpoint not advanced",
                 len(batch),
+                extra={"scanned": len(batch)},
             )
             return
 
@@ -336,6 +370,12 @@ class Poller:
                 span.span_id,
                 evaluator_name,
                 evaluator_version,
+                extra={
+                    "project_id": str(span.project_id),
+                    "span_id": span.span_id,
+                    "evaluator_name": evaluator_name,
+                    "evaluator_version": evaluator_version,
+                },
             )
             return JobCreationOutcome(resolved=False)
 
