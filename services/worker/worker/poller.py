@@ -73,7 +73,7 @@ from uuid import UUID
 import psycopg
 
 from worker.clickhouse.eligible_span_repository import EligibleSpan, EligibleSpanRepository
-from worker.heartbeat import touch_heartbeat
+from worker.heartbeat import HeartbeatWatchdog, touch_heartbeat
 from worker.postgres.poller_checkpoint_repository import PollerCheckpointRepository
 from worker.registry import EvaluatorRegistry
 
@@ -238,7 +238,9 @@ class Poller:
         poller_start_time_lookback_days: int,
         poller_interval_seconds: float,
         heartbeat_callback: Callable[[], None] = touch_heartbeat,
+        watchdog_stale_seconds: float | None = None,
     ) -> None:
+        self._watchdog_stale_seconds = watchdog_stale_seconds
         self._eligible_span_repository = eligible_span_repository
         self._checkpoint_connection_factory = checkpoint_connection_factory
         self._job_creation_client = job_creation_client
@@ -280,6 +282,14 @@ class Poller:
         self._install_signal_handlers()
         logger.info("evaluation job poller starting")
         self._heartbeat_callback()
+        if self._watchdog_stale_seconds is not None:
+            # See `worker.heartbeat.HeartbeatWatchdog` and
+            # `WorkerRuntime.run`'s identical start.
+            HeartbeatWatchdog(
+                stale_seconds=self._watchdog_stale_seconds,
+                stop_event=self._stop_event,
+                service="poller",
+            ).start()
         while not self._stop_event.is_set():
             self._heartbeat_callback()
             self.run_one_tick()
@@ -338,6 +348,12 @@ class Poller:
 
         for span in batch:
             for evaluator_name, evaluator_version in installed_evaluators:
+                # Progress is liveness: one tick can make hundreds of sequential,
+                # individually-bounded HTTP calls, so refresh the heartbeat per
+                # call -- otherwise a slow-but-working batch would look stuck to
+                # the healthcheck and `HeartbeatWatchdog`, be restarted, and (the
+                # checkpoint only advances after a full batch) never finish.
+                self._heartbeat_callback()
                 outcome = self._call_job_creation(span, evaluator_name, evaluator_version)
                 if not outcome.resolved:
                     all_resolved = False

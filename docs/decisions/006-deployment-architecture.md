@@ -407,6 +407,19 @@ introduced.
   triggers the bounded-orphan self-retirement Phase 4A already added (a scenario meaningfully
   narrowed by this phase's own PostgreSQL fix) will now be caught by this healthcheck instead of
   appearing indefinitely healthy to Docker.
+  Docker's `HEALTHCHECK` only *labels* a container unhealthy; it never restarts one, and
+  `restart: unless-stopped` reacts only to process exit. So `worker/heartbeat.py`'s
+  `HeartbeatWatchdog` (a daemon thread started by `WorkerRuntime.run`/`Poller.run`, enabled by
+  `worker/__main__.py`/`poller_main.py`) force-exits the process (`os._exit(70)`) when the heartbeat
+  has been stale for 2x `heartbeat_stale_seconds` (360s by default -- well after the healthcheck
+  reports unhealthy, so a merely busy iteration is never killed), and the restart policy then
+  recovers it. It reads the in-memory timestamp `touch_heartbeat()` refreshes, so an unwritable
+  `/tmp` can never cause a kill. Once a stop has been requested (SIGTERM or the orphaned-evaluator
+  self-retirement) staleness is expected and ignored; the watchdog then fires only if the process is
+  still alive that same interval after the stop request, i.e. the shutdown itself hung. The deploy
+  workflow's health check also waits for the `worker` and `poller` containers to report `healthy`.
+  The poller refreshes its heartbeat after every job-creation call (not only once per tick), so a
+  slow-but-working batch of hundreds of sequential calls is never mistaken for a stuck loop.
 - **~~No org/project/API-key provisioning endpoint~~ -- resolved, Phase 4D (F3).**
   `POST /v1/provisioning/bootstrap` is now the production, HTTP-based equivalent of
   `apps/api/scripts/seed_local_api_key.py` -- deliberately bootstrap provisioning for a single
@@ -427,6 +440,11 @@ introduced.
   that (operator-level, disposable-environment-only) in `apps/api/README.md`'s "Provisioning"
   section, which also has the full operator workflow; see `app/services/provisioning.py`'s module
   docstring for the concurrency/atomicity argument in full.
+- **Container logs are size-bounded.** Docker's default `json-file` driver never rotates, so every
+  service in `docker-compose.prod.yml` shares one `x-logging` anchor: 5 files x 10 MB per container
+  (~350 MB for the stack). Only Docker's log files are affected -- not application logging or any
+  volume. Raise the limits there for a longer local history; ship logs off-host for anything
+  long-term.
 - **No TLS termination or reverse proxy.** `docker-compose.prod.yml` exposes `api` and `dashboard`
   as plain HTTP on the host. TLS termination is assumed to be handled by infrastructure the
   operator already has in front of this stack (a load balancer, an existing reverse proxy) --

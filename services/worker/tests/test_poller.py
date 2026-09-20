@@ -147,6 +147,7 @@ def _make_poller(
     poller_start_time_lookback_days: int = 3,
     poller_interval_seconds: float = 30.0,
     heartbeat_callback=None,
+    watchdog_stale_seconds=None,
 ) -> Poller:
     kwargs = {}
     if heartbeat_callback is not None:
@@ -160,6 +161,7 @@ def _make_poller(
         poller_overlap_seconds=poller_overlap_seconds,
         poller_start_time_lookback_days=poller_start_time_lookback_days,
         poller_interval_seconds=poller_interval_seconds,
+        watchdog_stale_seconds=watchdog_stale_seconds,
         **kwargs,
     )
 
@@ -683,3 +685,92 @@ def test_default_heartbeat_callback_is_touch_heartbeat() -> None:
     )
 
     assert poller._heartbeat_callback is touch_heartbeat
+
+
+# -- stuck-container recovery: heartbeat watchdog ------------------------------
+
+
+class _RecordingWatchdog:
+    instances: list[_RecordingWatchdog] = []
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.started = False
+        _RecordingWatchdog.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+
+def _run_poller_for_one_tick(**poller_kwargs) -> Poller:
+    checkpoint_conn = _checkpoint_connection_with_no_watermark()
+    holder: dict[str, Poller] = {}
+
+    def _stop_on_loop_heartbeat() -> None:
+        holder["poller"].request_stop()
+
+    poller = _make_poller(
+        eligible_span_repository=FakeEligibleSpanRepository(spans=[]),
+        checkpoint_connections=[checkpoint_conn],
+        job_creation_client=FakeJobCreationClient(),
+        registry=_registry(),
+        heartbeat_callback=_stop_on_loop_heartbeat,
+        **poller_kwargs,
+    )
+    holder["poller"] = poller
+    with patch("worker.poller.signal.signal"):
+        poller.run()
+    return poller
+
+
+def test_watchdog_is_off_by_default(monkeypatch) -> None:
+    _RecordingWatchdog.instances.clear()
+    monkeypatch.setattr("worker.poller.HeartbeatWatchdog", _RecordingWatchdog)
+
+    _run_poller_for_one_tick()
+
+    assert _RecordingWatchdog.instances == []
+
+
+def test_watchdog_starts_with_the_pollers_stop_event(monkeypatch) -> None:
+    _RecordingWatchdog.instances.clear()
+    monkeypatch.setattr("worker.poller.HeartbeatWatchdog", _RecordingWatchdog)
+
+    poller = _run_poller_for_one_tick(watchdog_stale_seconds=360.0)
+
+    (watchdog,) = _RecordingWatchdog.instances
+    assert watchdog.started
+    assert watchdog.kwargs["stale_seconds"] == 360.0
+    assert watchdog.kwargs["service"] == "poller"
+    assert watchdog.kwargs["stop_event"] is poller._stop_event
+
+
+def test_heartbeat_refreshes_per_job_creation_call_not_just_per_tick() -> None:
+    """A batch makes many sequential HTTP calls; liveness must track that
+    progress, or a slow-but-working tick would look stuck to the healthcheck
+    and the watchdog and be restarted before it could advance the checkpoint."""
+    heartbeat_calls = 0
+    checkpoint_conn = _checkpoint_connection_with_no_watermark()
+    ingested_at = datetime(2026, 9, 10, 12, 0, 0, tzinfo=UTC)
+    spans = [_span(ingested_at=ingested_at, span_id=f"{i:016x}") for i in range(1, 4)]
+    advance_conn = _FakeConnection()
+    advance_conn.queue_result(rowcount=1)  # CAS succeeds
+    job_client = FakeJobCreationClient()
+
+    def _count() -> None:
+        nonlocal heartbeat_calls
+        heartbeat_calls += 1
+
+    poller = _make_poller(
+        eligible_span_repository=FakeEligibleSpanRepository(spans=spans),
+        checkpoint_connections=[checkpoint_conn, advance_conn],
+        job_creation_client=job_client,
+        registry=_registry(("relevance", "0.1.0"), ("relevance_embedding", "0.1.0")),
+        heartbeat_callback=_count,
+    )
+
+    poller.run_one_tick()
+
+    calls_made = len(job_client.calls)
+    assert calls_made == 3 * 2  # every span x every installed evaluator
+    assert heartbeat_calls == calls_made  # run_one_tick itself adds none of its own

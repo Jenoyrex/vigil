@@ -135,7 +135,16 @@ class Settings(BaseSettings):
     # bounded by poller_interval_seconds (30s default) plus its own
     # ClickHouse/HTTP timeouts. 180s comfortably covers both at their
     # documented defaults; raise this if either of those settings is
-    # configured materially higher than its default.
+    # configured materially higher than its default. The in-process
+    # `worker.heartbeat.HeartbeatWatchdog` force-exits the process (so the
+    # container restart policy recovers it) at 2x this value -- see
+    # docs/decisions/006-deployment-architecture.md. The worker's longest
+    # gap between heartbeats is one claim batch, roughly
+    # ceil(claim_batch_size / max_concurrent_evaluations) x
+    # evaluator_call_timeout_seconds (plus init on a cold cache): the 4/4/30s
+    # defaults leave a wide margin, but raise this if claim_batch_size is
+    # raised well above max_concurrent_evaluations. (The poller heartbeats
+    # per job-creation call, so its gap stays ~poller_job_creation_timeout_seconds.)
     heartbeat_stale_seconds: float = 180.0
 
     # Retry/backoff (worker/failure_handling.py), per
