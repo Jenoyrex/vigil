@@ -52,7 +52,6 @@ RUN groupadd --system --gid 1000 vigil \
 WORKDIR /app
 
 COPY --from=builder --chown=vigil:vigil /build/worker/.venv /app/.venv
-COPY --from=builder --chown=vigil:vigil /build/worker/worker /app/worker
 
 # `vigil` is created with --no-create-home, so it has no writable $HOME --
 # services/evaluator/app/embedding_relevance.py's EmbeddingRelevanceEvaluator
@@ -79,6 +78,67 @@ ENV PATH="/app/.venv/bin:$PATH" \
     VIGIL_EVALUATOR_EMBEDDING_CACHE_DIR=/app/.cache/vigil-evaluator/fastembed
 
 USER vigil
+
+# Bake the embedding model into the image (docs/decisions/
+# 006-deployment-architecture.md). Downloaded once, at BUILD time, into the
+# exact cache directory `relevance_embedding` reads at runtime, by
+# constructing the real `EmbeddingRelevanceEvaluator` -- the same code path,
+# model name and `VIGIL_EVALUATOR_EMBEDDING_CACHE_DIR` the running worker
+# uses, so the two cannot drift apart. The build FAILS unless the model file
+# fastembed itself says this model resolves to (repository and file name are
+# read from fastembed's own model registry, not hardcoded here) is really on
+# disk and non-trivially sized, and unless a second construction with
+# HF_HUB_OFFLINE=1 succeeds from that cache alone -- so an empty or
+# incomplete cache can never ship. The model is therefore part of the
+# immutable image: the image tag determines the bundled snapshot (the
+# repository's latest revision at build time; revision pinning is a
+# deliberate future improvement). Do NOT mount a volume over this cache path
+# -- it would hide the baked model.
+#
+# Placed before `COPY worker` below so this layer is reused across
+# application-only changes; it is rebuilt only when the dependency layers
+# above it change.
+# (The script body below deliberately contains no $, backticks or backslashes, so Dockerfile
+# heredoc expansion cannot alter it.)
+RUN python - <<PY
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from app.embedding_relevance import MODEL_NAME, EmbeddingRelevanceEvaluator
+from fastembed import TextEmbedding
+
+cache_dir = Path(os.environ["VIGIL_EVALUATOR_EMBEDDING_CACHE_DIR"])
+EmbeddingRelevanceEvaluator()
+
+description = next(d for d in TextEmbedding.list_supported_models() if d["model"] == MODEL_NAME)
+repository_dir = cache_dir / ("models--" + description["sources"]["hf"].replace("/", "--"))
+matches = sorted(repository_dir.glob("snapshots/*/" + description["model_file"]))
+if not matches or matches[0].stat().st_size < 10_000_000:
+    sys.exit(f"model file {description['model_file']} missing or truncated under {repository_dir}")
+print(f"baked {MODEL_NAME}: {matches[0]} ({matches[0].stat().st_size} bytes)")
+
+subprocess.run(
+    [
+        sys.executable,
+        "-c",
+        "from app.embedding_relevance import EmbeddingRelevanceEvaluator; "
+        "EmbeddingRelevanceEvaluator()",
+    ],
+    env={**os.environ, "HF_HUB_OFFLINE": "1"},
+    check=True,
+)
+print("offline load from the baked cache: ok")
+PY
+
+# Production inference must never reach Hugging Face: everything it needs is
+# in the image (above). With this set, a missing model fails immediately
+# instead of stalling on network retries. Set only AFTER the bake, which
+# needs the network.
+ENV HF_HUB_OFFLINE=1
+
+COPY --from=builder --chown=vigil:vigil /build/worker/worker /app/worker
 
 # No EXPOSE: neither the runtime loop nor the poller runs an HTTP server
 # (both are long-running polling loops -- see docs/decisions/

@@ -185,10 +185,11 @@ malformed-construction and malformed-call-type rejection, evaluator name/version
 metadata, and a dedicated test that blocks all socket connections at the Python `socket` module level
 and asserts `evaluate()` still completes successfully.
 
-## Embedding relevance evaluator (experimental) (`app/embedding_relevance.py`)
+## Embedding relevance evaluator (`app/embedding_relevance.py`)
 
-**Not the V1 production evaluator.** `app/relevance.py`'s TF-IDF evaluator keeps that role
-unchanged — this section documents a second, independently selectable candidate built to answer
+**Supported V1 functionality, opt-in per project.** `app/relevance.py`'s TF-IDF evaluator remains
+available, unchanged, as the lightweight alternative — this section documents the second,
+independently selectable evaluator, built to answer
 the question the TF-IDF validation report (`validation/reports/wikiqa_baseline.md`) leaves open:
 "is a local semantic embedding worth its dependency cost?" See
 `validation/reports/wikiqa_comparison.md` for the evidence-based answer.
@@ -394,7 +395,7 @@ uv sync                      # TF-IDF baseline only
 uv run pytest
 uv run ruff check .
 
-uv sync --extra embedding    # adds the experimental embedding evaluator
+uv sync --extra embedding    # adds the embedding evaluator
 uv run pytest                # now also runs tests/test_embedding_relevance.py
 ```
 

@@ -98,7 +98,9 @@ class Settings(BaseSettings):
     # download of its ONNX model (~67MB from Hugging Face) on whichever
     # worker process/thread first calls `.get()` for it, a categorically
     # different, one-time cost that must never be judged against the tight
-    # per-call inference timeout.
+    # per-call inference timeout. (That download only happens outside the
+    # production image: it bakes the model in at build time and runs with
+    # HF_HUB_OFFLINE=1, so there construction is just a local load.)
     evaluator_init_timeout_seconds: float = 90.0
 
     # Bounded-orphan self-restart (Phase 4A, worker/timeouts.py,

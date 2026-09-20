@@ -199,6 +199,26 @@ later phases.
     writable, and `EmbeddingRelevanceEvaluator` successfully downloads the model and produces a
     result with no permission errors.
 
+    **The embedding model is baked into the image; production never downloads it.** The
+    paragraph above records the state when this decision was first written, when the model was
+    fetched from Hugging Face on first use, so every worker container *recreation* (every deploy)
+    re-downloaded about 65 MB, and a host without outbound access could stall each
+    `relevance_embedding` job for the full `evaluator_init_timeout_seconds`. `relevance_embedding`
+    is supported V1 functionality, so `services/worker/Dockerfile` now downloads the model at
+    build time, as the `vigil` user, into that same cache directory by constructing the real
+    `EmbeddingRelevanceEvaluator` (same code path, model name and cache variable the running worker
+    uses). The build fails unless the model file fastembed's own registry names for it
+    (`qdrant/bge-small-en-v1.5-onnx-q`'s `model_optimized.onnx`) is present and non-trivially sized,
+    and unless a second construction with `HF_HUB_OFFLINE=1` succeeds from that cache alone. The
+    runtime image then sets `HF_HUB_OFFLINE=1`, so inference never contacts Hugging Face and a
+    missing model fails immediately instead of stalling on retries. Consequences: the model cache
+    is part of the immutable image, so the **image tag determines the bundled model snapshot**
+    (the repository's latest revision at build time); rolling back an image rolls back the model.
+    **Do not mount a volume over `/app/.cache/vigil-evaluator/fastembed`** -- it would hide the
+    baked model. The download layer sits before the application `COPY`, so application-only
+    changes reuse it. Model revision pinning is intentionally deferred (fastembed 0.8's public
+    constructor has no `revision` argument; `specific_model_path` would be the route).
+
 13. **CI/CD publish and manual protected deploy (Phase 4D, F7).** `.github/workflows/cd.yml` is new;
     `.github/workflows/ci.yml` is unchanged and remains validation-only -- the two are independent
     workflows, not chained.
