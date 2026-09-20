@@ -260,11 +260,16 @@ def test_higher_threshold_can_flip_the_same_pair_to_not_relevant(
 def test_threshold_boundary_is_inclusive_of_relevant() -> None:
     """A score exactly equal to the threshold counts as relevant (>=, not >), matching
     RelevanceEvaluator's own convention exactly."""
-    evaluator = EmbeddingRelevanceEvaluator(threshold=1.0)
+    # Use the score the model actually produced as the threshold, rather than a hardcoded 1.0:
+    # float32 embeddings of identical text have a norm of exactly 1.0 on some platforms but a
+    # hair under it (e.g. 0.99999994) on others, so the rescaled score is only ~1.0, not
+    # guaranteed == 1.0.
+    evaluator = EmbeddingRelevanceEvaluator()
     text = "identical text on both sides"
-    result = evaluator.evaluate(RelevanceEvaluatorInput(text, text))
-    assert result.score == pytest.approx(1.0, abs=1e-4)
-    assert result.label == "relevant"
+    evaluator_input = RelevanceEvaluatorInput(text, text)
+    score = evaluator.evaluate(evaluator_input).score
+    assert score == pytest.approx(1.0, abs=1e-4)
+    assert evaluator.evaluate(evaluator_input, threshold=score).label == "relevant"
 
 
 # -- per-call threshold override -------------------------------------------
