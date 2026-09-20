@@ -158,6 +158,30 @@ class Settings(BaseSettings):
     login_rate_limit_refill_per_second: float = 0.1
     login_rate_limit_max_tracked_ips: int = 10_000
 
+    # Per-account (normalized email) login rate limiting -- a second,
+    # independent defense alongside the per-IP tier above: protects one
+    # account from being guessed at even when the attempts arrive from many
+    # different IPs. Keyed by the attempted email whether or not that
+    # account exists, so rate-limit behavior never reveals account
+    # existence. Counts every attempt (successful or not), for the same
+    # no-side-channel reason as the IP tier. Sustained rate is one attempt
+    # per minute after an initial burst of 10.
+    login_account_rate_limit_capacity: int = 10
+    login_account_rate_limit_refill_per_second: float = 1 / 60
+    login_account_rate_limit_max_tracked_accounts: int = 10_000
+
+    # Shared secret proving a request to POST /v1/auth/login really comes
+    # from apps/dashboard's server, and is therefore allowed to tell the API
+    # which end-user IP the login came from (`X-Vigil-Client-IP`). Its ONLY
+    # power is that attribution -- deliberately a separate credential from
+    # `internal_service_token` (which authorizes the worker fleet to create
+    # evaluation jobs): the dashboard is the internet-facing process, so it
+    # must never hold, or be able to exercise, worker privileges. Empty (the
+    # default) disables the feature: the API then always rate-limits login
+    # by its direct peer address. Must be identical to the dashboard's own
+    # VIGIL_API_DASHBOARD_CLIENT_IP_TOKEN.
+    dashboard_client_ip_token: str = ""
+
     @property
     def cors_allowed_origins_list(self) -> list[str]:
         """Parsed, validated form of `cors_allowed_origins`.

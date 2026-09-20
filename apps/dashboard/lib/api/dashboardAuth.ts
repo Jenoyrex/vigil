@@ -96,14 +96,28 @@ export interface SessionInfo {
  * response, and this function passes that generic message straight
  * through rather than adding its own guesswork on top.
  */
-export async function login(email: string, password: string): Promise<LoginResult> {
+export async function login(
+  email: string,
+  password: string,
+  clientIp: string | null = null,
+): Promise<LoginResult> {
   const baseUrl = requireApiBaseUrl();
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // Only ever an IP this server derived itself (lib/api/clientIp.ts), sent
+  // together with the shared secret that makes the API believe it -- never
+  // any header copied from the browser request.
+  const attributionToken = process.env.VIGIL_API_DASHBOARD_CLIENT_IP_TOKEN;
+  if (clientIp && attributionToken) {
+    headers["X-Vigil-Dashboard-Token"] = attributionToken;
+    headers["X-Vigil-Client-IP"] = clientIp;
+  }
 
   let response: Response;
   try {
     response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/auth/login`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ email, password }),
       cache: "no-store",
     });

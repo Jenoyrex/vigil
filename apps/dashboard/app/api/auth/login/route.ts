@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
+import { deriveClientIp, parseTrustedProxyHops } from "@/lib/api/clientIp";
 import { login, SESSION_COOKIE_NAME, sessionCookieOptions } from "@/lib/api/dashboardAuth";
 
 import { handleVigilError } from "../../vigil/_lib/handleError";
@@ -54,7 +55,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    const result = await login(email, password);
+    const clientIp = deriveClientIp(
+      request.headers.get("x-forwarded-for"),
+      parseTrustedProxyHops(process.env.VIGIL_DASHBOARD_TRUSTED_PROXY_HOPS),
+    );
+    const result = await login(email, password, clientIp);
     const response = NextResponse.json({ ok: true });
     response.cookies.set(SESSION_COOKIE_NAME, result.sessionToken, sessionCookieOptions(result.expiresAt));
     return response;

@@ -16,7 +16,11 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.rate_limit import RateLimiter, get_login_rate_limiter
+from app.api.rate_limit import (
+    RateLimiter,
+    get_login_account_rate_limiter,
+    get_login_rate_limiter,
+)
 from app.main import app
 
 LOGIN_URL = "/v1/auth/login"
@@ -35,13 +39,20 @@ def _generous_login_rate_limit() -> None:
     by client IP, and TestClient always reports the same simulated IP, so
     every test in this module sharing the real (production-sized) limiter
     would exhaust it and start seeing spurious 429s unrelated to what a
-    given test is actually checking. `tests/conftest.py`'s `client`
-    fixture clears `app.dependency_overrides` after every test.
+    given test is actually checking. The per-account limiter is a
+    process-wide singleton too (keyed by email; several tests here reuse
+    the same unknown email), so it gets the same treatment.
+    `tests/conftest.py`'s `client` fixture clears `app.dependency_overrides`
+    after every test.
     """
     limiter: RateLimiter[str] = RateLimiter(
         capacity=1000, refill_per_second=1000.0, max_tracked_keys=10
     )
+    account_limiter: RateLimiter[str] = RateLimiter(
+        capacity=1000, refill_per_second=1000.0, max_tracked_keys=1000
+    )
     app.dependency_overrides[get_login_rate_limiter] = lambda: limiter
+    app.dependency_overrides[get_login_account_rate_limiter] = lambda: account_limiter
 
 
 def _override_login_limiter(**kwargs) -> RateLimiter:

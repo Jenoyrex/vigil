@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import uuid
 from dataclasses import dataclass
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
@@ -115,6 +116,42 @@ def get_internal_service_auth(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_INTERNAL_TOKEN_DETAIL
         )
+
+
+DASHBOARD_TOKEN_HEADER = "X-Vigil-Dashboard-Token"
+CLIENT_IP_HEADER = "X-Vigil-Client-IP"
+
+
+def get_login_client_key(
+    request: Request,
+    x_vigil_dashboard_token: str | None = Header(default=None, alias=DASHBOARD_TOKEN_HEADER),
+    x_vigil_client_ip: str | None = Header(default=None, alias=CLIENT_IP_HEADER),
+) -> str:
+    """The identity `POST /v1/auth/login` is rate-limited by per IP.
+
+    Behind apps/dashboard every login arrives from the dashboard
+    container's own address, so the direct peer says nothing about the
+    real user. The dashboard therefore reports the end-user IP in
+    `X-Vigil-Client-IP`, and this dependency believes that header ONLY when
+    the same request also presents `X-Vigil-Dashboard-Token` matching
+    `settings.dashboard_client_ip_token` (constant-time comparison; a
+    disabled/empty setting never matches anything). Any other request --
+    direct API traffic, a missing or wrong token, a malformed IP -- is
+    keyed by its direct peer address, exactly as before. Client-supplied
+    `X-Forwarded-For`/`X-Real-IP` are never consulted here.
+    """
+    peer = request.client.host if request.client is not None else "unknown"
+
+    expected = settings.dashboard_client_ip_token
+    if not expected or x_vigil_dashboard_token is None or x_vigil_client_ip is None:
+        return peer
+    if not hmac.compare_digest(x_vigil_dashboard_token.encode("utf-8"), expected.encode("utf-8")):
+        return peer
+
+    try:
+        return str(ipaddress.ip_address(x_vigil_client_ip.strip()))
+    except ValueError:
+        return peer
 
 
 BOOTSTRAP_TOKEN_HEADER = "X-Vigil-Bootstrap-Token"
