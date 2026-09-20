@@ -70,3 +70,7 @@ build/
 infrastructure/backup/output/
 *.dump
 *.native
+# Encrypted backup artifacts (scheduled_backup.sh/encrypt_and_verify.sh) --
+# still real customer/control-plane data even encrypted; belt-and-suspenders
+# on top of infrastructure/backup/output/ already being ignored above.
+*.gpg
