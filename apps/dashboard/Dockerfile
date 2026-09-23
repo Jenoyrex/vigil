@@ -30,7 +30,7 @@
 #     --build-context workspace=. \
 #     apps/dashboard
 
-FROM node:22-bookworm-slim AS base
+FROM node:25-bookworm-slim AS base
 RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
 
 
@@ -58,7 +58,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build
 
 
-FROM node:22-bookworm-slim AS runtime
+FROM node:25-bookworm-slim AS runtime
 
 # uid/gid 1000 is already taken by the base image's built-in `node`
 # user/group, so `vigil` here uses 1001 instead (apps/api and
