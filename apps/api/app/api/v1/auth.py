@@ -33,7 +33,12 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_session_token
-from app.api.rate_limit import require_login_rate_limit
+from app.api.rate_limit import (
+    RateLimiter,
+    enforce_login_account_rate_limit,
+    get_login_account_rate_limiter,
+    require_login_rate_limit,
+)
 from app.config import settings
 from app.db.session import get_db
 from app.schemas.auth import LoginRequest, LoginResponse, SessionResponse
@@ -69,10 +74,20 @@ def _unauthorized_session() -> HTTPException:
     ),
     responses={
         401: {"description": "Invalid email or password."},
-        429: {"description": "Rate limit exceeded for login attempts. See the Retry-After header."},
+        429: {
+            "description": (
+                "Rate limit exceeded for login attempts (per client IP or per account). "
+                "See the Retry-After header."
+            )
+        },
     },
 )
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> LoginResponse:
+def login(
+    payload: LoginRequest,
+    db: Session = Depends(get_db),
+    account_limiter: RateLimiter[str] = Depends(get_login_account_rate_limiter),
+) -> LoginResponse:
+    enforce_login_account_rate_limit(account_limiter, payload.email)
     result = authenticate_and_create_session(
         db,
         email=payload.email,

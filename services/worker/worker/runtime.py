@@ -61,7 +61,7 @@ from collections.abc import Callable
 import psycopg
 
 from worker.dispatcher import Dispatcher, DispatchOutcome
-from worker.heartbeat import touch_heartbeat
+from worker.heartbeat import HeartbeatWatchdog, touch_heartbeat
 from worker.postgres.repository import ClaimedJob, EvaluationJobsRepository
 from worker.reaper import ReapedJobOutcome, reap_stuck_jobs
 from worker.timeouts import outstanding_orphaned_calls
@@ -106,7 +106,9 @@ class WorkerRuntime:
         reaper_batch_size: int,
         max_orphaned_evaluator_threads: int = 4,
         heartbeat_callback: Callable[[], None] = touch_heartbeat,
+        watchdog_stale_seconds: float | None = None,
     ) -> None:
+        self._watchdog_stale_seconds = watchdog_stale_seconds
         self._dispatcher = dispatcher
         self._jobs_connection_factory = jobs_connection_factory
         self._worker_id = worker_id
@@ -163,6 +165,16 @@ class WorkerRuntime:
             extra={"worker_id": self._worker_id},
         )
         self._heartbeat_callback()
+        if self._watchdog_stale_seconds is not None:
+            # Force-exits this process if the loop below ever stops
+            # heartbeating, so `restart: unless-stopped` recovers it -- see
+            # `worker.heartbeat.HeartbeatWatchdog`. Started only after the
+            # first heartbeat, so startup is never seen as stale.
+            HeartbeatWatchdog(
+                stale_seconds=self._watchdog_stale_seconds,
+                stop_event=self._stop_event,
+                service="worker",
+            ).start()
 
         self._reap()
         last_reap_at = time.monotonic()

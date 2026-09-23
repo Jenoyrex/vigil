@@ -379,8 +379,31 @@ jobs:
               echo "$url did not become healthy in time" >&2
               return 1
             }
+            # worker/poller have no HTTP endpoint: they report health through
+            # their heartbeat-based container HEALTHCHECK. Looked up by
+            # Compose labels (project name is pinned in the compose file),
+            # since `docker compose ps` would need the VIGIL_*_IMAGE
+            # variables that are not set in this shell.
+            check_container() {
+              service="$1"
+              for i in $(seq 1 30); do
+                id=$(docker ps -q \
+                  --filter "label=com.docker.compose.project=vigil-prod" \
+                  --filter "label=com.docker.compose.service=$service")
+                if [ -n "$id" ] && \
+                   [ "$(docker inspect --format "{{.State.Health.Status}}" "$id")" = "healthy" ]; then
+                  echo "$service container is healthy"
+                  return 0
+                fi
+                sleep 5
+              done
+              echo "$service container did not become healthy in time" >&2
+              return 1
+            }
             check "http://127.0.0.1:8000/ready"
             check "http://127.0.0.1:3000/"
+            check_container worker
+            check_container poller
           '
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}

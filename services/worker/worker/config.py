@@ -98,7 +98,9 @@ class Settings(BaseSettings):
     # download of its ONNX model (~67MB from Hugging Face) on whichever
     # worker process/thread first calls `.get()` for it, a categorically
     # different, one-time cost that must never be judged against the tight
-    # per-call inference timeout.
+    # per-call inference timeout. (That download only happens outside the
+    # production image: it bakes the model in at build time and runs with
+    # HF_HUB_OFFLINE=1, so there construction is just a local load.)
     evaluator_init_timeout_seconds: float = 90.0
 
     # Bounded-orphan self-restart (Phase 4A, worker/timeouts.py,
@@ -135,7 +137,16 @@ class Settings(BaseSettings):
     # bounded by poller_interval_seconds (30s default) plus its own
     # ClickHouse/HTTP timeouts. 180s comfortably covers both at their
     # documented defaults; raise this if either of those settings is
-    # configured materially higher than its default.
+    # configured materially higher than its default. The in-process
+    # `worker.heartbeat.HeartbeatWatchdog` force-exits the process (so the
+    # container restart policy recovers it) at 2x this value -- see
+    # docs/decisions/006-deployment-architecture.md. The worker's longest
+    # gap between heartbeats is one claim batch, roughly
+    # ceil(claim_batch_size / max_concurrent_evaluations) x
+    # evaluator_call_timeout_seconds (plus init on a cold cache): the 4/4/30s
+    # defaults leave a wide margin, but raise this if claim_batch_size is
+    # raised well above max_concurrent_evaluations. (The poller heartbeats
+    # per job-creation call, so its gap stays ~poller_job_creation_timeout_seconds.)
     heartbeat_stale_seconds: float = 180.0
 
     # Retry/backoff (worker/failure_handling.py), per

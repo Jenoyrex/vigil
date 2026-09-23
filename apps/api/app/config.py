@@ -10,6 +10,15 @@ class Settings(BaseSettings):
     app_name: str = "Vigil API"
     database_url: str = "postgresql+psycopg://vigil:vigil@localhost:5434/vigil"
 
+    # PostgreSQL I/O bound (Phase 4D), mirroring services/worker/worker/
+    # postgres/client.py's identical setting/rationale and this class's own
+    # clickhouse_timeout_seconds below: bounds both connection establishment
+    # (libpq's connect_timeout) and server-side statement execution
+    # (PostgreSQL's own statement_timeout, set via the engine's connect_args
+    # -- see app/db/session.py), so a stuck query can no longer occupy an
+    # API request thread indefinitely.
+    database_timeout_seconds: float = 10.0
+
     # Structured logging (Phase 4D, F4, app/logging_config.py). Standard
     # Python logging level name -- validated below so a typo fails loudly at
     # process start (the same posture `cors_allowed_origins_list` already
@@ -148,6 +157,30 @@ class Settings(BaseSettings):
     login_rate_limit_capacity: int = 10
     login_rate_limit_refill_per_second: float = 0.1
     login_rate_limit_max_tracked_ips: int = 10_000
+
+    # Per-account (normalized email) login rate limiting -- a second,
+    # independent defense alongside the per-IP tier above: protects one
+    # account from being guessed at even when the attempts arrive from many
+    # different IPs. Keyed by the attempted email whether or not that
+    # account exists, so rate-limit behavior never reveals account
+    # existence. Counts every attempt (successful or not), for the same
+    # no-side-channel reason as the IP tier. Sustained rate is one attempt
+    # per minute after an initial burst of 10.
+    login_account_rate_limit_capacity: int = 10
+    login_account_rate_limit_refill_per_second: float = 1 / 60
+    login_account_rate_limit_max_tracked_accounts: int = 10_000
+
+    # Shared secret proving a request to POST /v1/auth/login really comes
+    # from apps/dashboard's server, and is therefore allowed to tell the API
+    # which end-user IP the login came from (`X-Vigil-Client-IP`). Its ONLY
+    # power is that attribution -- deliberately a separate credential from
+    # `internal_service_token` (which authorizes the worker fleet to create
+    # evaluation jobs): the dashboard is the internet-facing process, so it
+    # must never hold, or be able to exercise, worker privileges. Empty (the
+    # default) disables the feature: the API then always rate-limits login
+    # by its direct peer address. Must be identical to the dashboard's own
+    # VIGIL_API_DASHBOARD_CLIENT_IP_TOKEN.
+    dashboard_client_ip_token: str = ""
 
     @property
     def cors_allowed_origins_list(self) -> list[str]:

@@ -49,10 +49,27 @@
 # See docs/decisions/006-deployment-architecture.md decision 5.
 name: vigil-prod
 
+# Bounded container logs. Docker's default `json-file` driver never rotates,
+# so without this every service's stdout (including the structured JSON logs
+# from api/worker/poller) grows until the host disk is full. Every service
+# below uses this one anchor: at most 5 files of 10 MB each = 50 MB per
+# container (~350 MB for the whole stack), oldest lines dropped first. A
+# conservative starting point for a small single-host deployment; raise
+# `max-size`/`max-file` if you need a longer local history (ship logs
+# elsewhere for anything long-term). Changing these options recreates the
+# containers on the next `up`. Affects only Docker's log files, not any
+# application's own logging or any volume's data.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -71,6 +88,7 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
@@ -103,6 +121,7 @@ services:
       context: ../apps/api
       dockerfile: Dockerfile
     restart: "no"
+    logging: *default-logging
     # python -m alembic, not the `alembic` console-script wrapper -- see
     # apps/api/Dockerfile's CMD comment for why (broken shebang across the
     # builder/runtime stage boundary).
@@ -125,6 +144,7 @@ services:
       context: ../apps/api
       dockerfile: Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "8000:8000"
     environment:
@@ -135,6 +155,7 @@ services:
       VIGIL_API_CLICKHOUSE_USER: ${VIGIL_API_CLICKHOUSE_USER}
       VIGIL_API_CLICKHOUSE_PASSWORD: ${VIGIL_API_CLICKHOUSE_PASSWORD}
       VIGIL_API_INTERNAL_SERVICE_TOKEN: ${VIGIL_API_INTERNAL_SERVICE_TOKEN}
+      VIGIL_API_DASHBOARD_CLIENT_IP_TOKEN: ${VIGIL_API_DASHBOARD_CLIENT_IP_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -151,11 +172,14 @@ services:
       additional_contexts:
         workspace: ..
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "3000:3000"
     environment:
       VIGIL_API_BASE_URL: ${VIGIL_API_BASE_URL}
       VIGIL_API_KEY: ${VIGIL_API_KEY}
+      VIGIL_API_DASHBOARD_CLIENT_IP_TOKEN: ${VIGIL_API_DASHBOARD_CLIENT_IP_TOKEN:-}
+      VIGIL_DASHBOARD_TRUSTED_PROXY_HOPS: ${VIGIL_DASHBOARD_TRUSTED_PROXY_HOPS:-0}
     depends_on:
       api:
         condition: service_healthy
@@ -174,6 +198,7 @@ services:
       additional_contexts:
         evaluator: ../services/evaluator
     restart: unless-stopped
+    logging: *default-logging
     command: ["python", "-m", "worker"]
     # No `ports:` -- this is a polling loop, not an HTTP server.
     environment:
@@ -208,6 +233,7 @@ services:
       additional_contexts:
         evaluator: ../services/evaluator
     restart: unless-stopped
+    logging: *default-logging
     command: ["python", "-m", "worker.poller_main"]
     # No `ports:` -- this is a polling loop, not an HTTP server.
     environment:

@@ -1,11 +1,12 @@
-"""Experimental candidate relevance evaluator: dense semantic embedding cosine similarity.
+"""Relevance evaluator (supported, opt-in per project): dense semantic embedding cosine similarity.
 
-Not the V1 production evaluator -- `app/relevance.py`'s TF-IDF lexical baseline keeps that role
-unchanged. This module is the "next milestone" ADR 004 section 10 calls for: an embedding-based
+Supported V1 functionality, opt-in per project -- `app/relevance.py`'s TF-IDF lexical baseline
+remains the lightweight alternative and is unchanged. This module is the "next milestone" ADR 004
+section 10 calls for: an embedding-based
 implementation of the same relevance question, built to be validated head-to-head against the
 TF-IDF baseline via the offline WikiQA harness (see `validation/wikiqa_embedding.py` and
 `validation/reports/wikiqa_comparison.md` for the resulting evidence and decision). See
-`README.md`'s "Embedding relevance evaluator (experimental)" section for the full model-selection
+`README.md`'s "Embedding relevance evaluator" section for the full model-selection
 comparison that led to the choice below.
 
 Algorithm: encode `input_text` and `output_text` independently with a local ONNX sentence-embedding
@@ -29,7 +30,8 @@ Two distinct phases, deliberately separated -- see this module's tests and
 - **First-time model acquisition** (network): the first time a process constructs
   `EmbeddingRelevanceEvaluator` with no cached weights at `cache_dir`, `fastembed` downloads the
   ~67 MB quantized ONNX model + tokenizer from Hugging Face into `cache_dir` -- outside this
-  repository (see `DEFAULT_CACHE_DIR` below), never committed to git.
+  repository (see `DEFAULT_CACHE_DIR` below), never committed to git. The production worker image
+  performs this once at build time and runs with `HF_HUB_OFFLINE=1` (ADR 006, decision 12).
 - **Offline inference** (no network): every `evaluate()` call thereafter -- and every call in a
   process where the cache was already populated by a prior run -- is pure local ONNX Runtime
   computation. `tests/test_embedding_relevance.py::test_evaluate_makes_no_network_calls` blocks

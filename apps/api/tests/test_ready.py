@@ -11,6 +11,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 from app.main import app
 
@@ -102,6 +103,40 @@ def test_ready_ping_database_raises_on_a_real_unreachable_engine() -> None:
             pass
         else:
             raise AssertionError("expected ping_database() to raise for an unreachable engine")
+
+
+def test_session_has_postgresql_statement_timeout_configured() -> None:
+    """Proves the real `app.db.session.SessionLocal`/`engine` -- not a
+    reconstructed one -- actually has PostgreSQL's `statement_timeout` GUC
+    set to `settings.database_timeout_seconds` (Phase 4D). Inspecting
+    `create_engine(...)`'s `connect_args` alone would only prove they were
+    *passed*, not that PostgreSQL actually *applied* them -- this queries
+    the live server-side setting on a real connection from the real pool
+    instead, the same way any other real-Postgres test in this suite
+    requires a reachable database (no skip-if-unreachable guard here,
+    matching `tests/conftest.py`'s `db_session` fixture).
+
+    `current_setting('statement_timeout')` is cast through `::interval`
+    rather than compared as a string: PostgreSQL formats a duration GUC in
+    whichever unit is most compact for its value (e.g. `'10s'`, not
+    `'10000ms'`, for this default) -- casting to `interval` and extracting
+    milliseconds is immune to that formatting choice.
+    """
+    from app.config import settings
+    from app.db.session import SessionLocal
+
+    session = SessionLocal()
+    try:
+        statement_timeout_ms = session.execute(
+            text(
+                "SELECT extract(epoch FROM current_setting('statement_timeout')::interval)"
+                " * 1000"
+            )
+        ).scalar_one()
+    finally:
+        session.close()
+
+    assert float(statement_timeout_ms) == settings.database_timeout_seconds * 1000
 
 
 def test_health_is_unaffected_by_the_readiness_change() -> None:

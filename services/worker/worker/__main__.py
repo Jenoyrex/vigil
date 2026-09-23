@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from worker.config import settings
 from worker.dispatcher import Dispatcher
+from worker.heartbeat import WATCHDOG_STALE_MULTIPLIER
 from worker.logging_config import configure_logging
 from worker.postgres.client import get_connection
 from worker.registry import EvaluatorRegistry
@@ -42,6 +43,7 @@ def main() -> None:
         stuck_job_threshold_seconds=settings.stuck_job_threshold_seconds,
         reaper_batch_size=settings.reaper_batch_size,
         max_orphaned_evaluator_threads=settings.max_orphaned_evaluator_threads,
+        watchdog_stale_seconds=settings.heartbeat_stale_seconds * WATCHDOG_STALE_MULTIPLIER,
     )
     runtime.run()
 

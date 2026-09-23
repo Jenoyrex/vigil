@@ -199,6 +199,26 @@ later phases.
     writable, and `EmbeddingRelevanceEvaluator` successfully downloads the model and produces a
     result with no permission errors.
 
+    **The embedding model is baked into the image; production never downloads it.** The
+    paragraph above records the state when this decision was first written, when the model was
+    fetched from Hugging Face on first use, so every worker container *recreation* (every deploy)
+    re-downloaded about 65 MB, and a host without outbound access could stall each
+    `relevance_embedding` job for the full `evaluator_init_timeout_seconds`. `relevance_embedding`
+    is supported V1 functionality, so `services/worker/Dockerfile` now downloads the model at
+    build time, as the `vigil` user, into that same cache directory by constructing the real
+    `EmbeddingRelevanceEvaluator` (same code path, model name and cache variable the running worker
+    uses). The build fails unless the model file fastembed's own registry names for it
+    (`qdrant/bge-small-en-v1.5-onnx-q`'s `model_optimized.onnx`) is present and non-trivially sized,
+    and unless a second construction with `HF_HUB_OFFLINE=1` succeeds from that cache alone. The
+    runtime image then sets `HF_HUB_OFFLINE=1`, so inference never contacts Hugging Face and a
+    missing model fails immediately instead of stalling on retries. Consequences: the model cache
+    is part of the immutable image, so the **image tag determines the bundled model snapshot**
+    (the repository's latest revision at build time); rolling back an image rolls back the model.
+    **Do not mount a volume over `/app/.cache/vigil-evaluator/fastembed`** -- it would hide the
+    baked model. The download layer sits before the application `COPY`, so application-only
+    changes reuse it. Model revision pinning is intentionally deferred (fastembed 0.8's public
+    constructor has no `revision` argument; `specific_model_path` would be the route).
+
 13. **CI/CD publish and manual protected deploy (Phase 4D, F7).** `.github/workflows/cd.yml` is new;
     `.github/workflows/ci.yml` is unchanged and remains validation-only -- the two are independent
     workflows, not chained.
@@ -380,14 +400,20 @@ introduced.
 
 ## Known limitations
 
-- **~~No I/O timeout on PostgreSQL calls~~ -- resolved, Phase 4D.** `services/worker/worker
-  /postgres/client.py`'s `get_connection()` now sets both libpq's `connect_timeout` and
-  PostgreSQL's own server-side `statement_timeout` from the new `database_timeout_seconds`
-  setting (mirroring `worker/clickhouse/client.py`'s pre-existing `connect_timeout`/
-  `send_receive_timeout` pattern) -- a stuck PostgreSQL call can no longer block a worker thread
-  indefinitely. One residual, explicitly accepted gap remains: a network partition occurring
-  *after* a connection is established, where the server's own cancellation response never
-  arrives, could in principle still exceed this bound -- see that module's own docstring.
+- **~~No I/O timeout on PostgreSQL calls~~ -- resolved, Phase 4D, both services.**
+  `services/worker/worker/postgres/client.py`'s `get_connection()` sets both libpq's
+  `connect_timeout` and PostgreSQL's own server-side `statement_timeout` from the worker's
+  `database_timeout_seconds` setting (mirroring `worker/clickhouse/client.py`'s pre-existing
+  `connect_timeout`/`send_receive_timeout` pattern) -- a stuck PostgreSQL call can no longer block
+  a worker thread indefinitely. `apps/api/app/db/session.py`'s SQLAlchemy `engine` closes the
+  identical gap on the API side, via the same `connect_timeout`/`statement_timeout` pair passed as
+  `connect_args` (SQLAlchemy's documented mechanism for forwarding driver-specific connection
+  parameters to `psycopg`), bounded by its own `database_timeout_seconds` setting -- a stuck query
+  can no longer occupy an API request thread indefinitely either, and `pool_pre_ping`'s own
+  liveness `SELECT` is now implicitly bounded by the same setting as a side effect. One residual,
+  explicitly accepted gap remains on both sides: a network partition occurring *after* a
+  connection is established, where the server's own cancellation response never arrives, could in
+  principle still exceed this bound -- see each module's own docstring.
 - **~~No HTTP healthcheck for `worker`/`poller`~~ -- resolved differently, Phase 4D.** Rather than
   adding an HTTP server to either process solely to satisfy a healthcheck (new exposed network
   surface for zero other benefit), both `worker/runtime.py`'s `WorkerRuntime.run` and
@@ -401,6 +427,19 @@ introduced.
   triggers the bounded-orphan self-retirement Phase 4A already added (a scenario meaningfully
   narrowed by this phase's own PostgreSQL fix) will now be caught by this healthcheck instead of
   appearing indefinitely healthy to Docker.
+  Docker's `HEALTHCHECK` only *labels* a container unhealthy; it never restarts one, and
+  `restart: unless-stopped` reacts only to process exit. So `worker/heartbeat.py`'s
+  `HeartbeatWatchdog` (a daemon thread started by `WorkerRuntime.run`/`Poller.run`, enabled by
+  `worker/__main__.py`/`poller_main.py`) force-exits the process (`os._exit(70)`) when the heartbeat
+  has been stale for 2x `heartbeat_stale_seconds` (360s by default -- well after the healthcheck
+  reports unhealthy, so a merely busy iteration is never killed), and the restart policy then
+  recovers it. It reads the in-memory timestamp `touch_heartbeat()` refreshes, so an unwritable
+  `/tmp` can never cause a kill. Once a stop has been requested (SIGTERM or the orphaned-evaluator
+  self-retirement) staleness is expected and ignored; the watchdog then fires only if the process is
+  still alive that same interval after the stop request, i.e. the shutdown itself hung. The deploy
+  workflow's health check also waits for the `worker` and `poller` containers to report `healthy`.
+  The poller refreshes its heartbeat after every job-creation call (not only once per tick), so a
+  slow-but-working batch of hundreds of sequential calls is never mistaken for a stuck loop.
 - **~~No org/project/API-key provisioning endpoint~~ -- resolved, Phase 4D (F3).**
   `POST /v1/provisioning/bootstrap` is now the production, HTTP-based equivalent of
   `apps/api/scripts/seed_local_api_key.py` -- deliberately bootstrap provisioning for a single
@@ -421,6 +460,11 @@ introduced.
   that (operator-level, disposable-environment-only) in `apps/api/README.md`'s "Provisioning"
   section, which also has the full operator workflow; see `app/services/provisioning.py`'s module
   docstring for the concurrency/atomicity argument in full.
+- **Container logs are size-bounded.** Docker's default `json-file` driver never rotates, so every
+  service in `docker-compose.prod.yml` shares one `x-logging` anchor: 5 files x 10 MB per container
+  (~350 MB for the stack). Only Docker's log files are affected -- not application logging or any
+  volume. Raise the limits there for a longer local history; ship logs off-host for anything
+  long-term.
 - **No TLS termination or reverse proxy.** `docker-compose.prod.yml` exposes `api` and `dashboard`
   as plain HTTP on the host. TLS termination is assumed to be handled by infrastructure the
   operator already has in front of this stack (a load balancer, an existing reverse proxy) --

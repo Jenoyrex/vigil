@@ -1,4 +1,4 @@
-"""Tests for the experimental embedding relevance evaluator (app/embedding_relevance.py).
+"""Tests for the embedding relevance evaluator (app/embedding_relevance.py).
 
 Requires the `embedding` extra (`uv sync --extra embedding` / `pip install -e ".[embedding]"`) --
 skipped automatically if `fastembed` is not installed, so `uv run pytest` without the extra still
@@ -12,6 +12,7 @@ tests via a module-scoped fixture, so the (network, one-time) download cost and 
 from __future__ import annotations
 
 import socket
+import time
 
 import pytest
 
@@ -260,11 +261,16 @@ def test_higher_threshold_can_flip_the_same_pair_to_not_relevant(
 def test_threshold_boundary_is_inclusive_of_relevant() -> None:
     """A score exactly equal to the threshold counts as relevant (>=, not >), matching
     RelevanceEvaluator's own convention exactly."""
-    evaluator = EmbeddingRelevanceEvaluator(threshold=1.0)
+    # Use the score the model actually produced as the threshold, rather than a hardcoded 1.0:
+    # float32 embeddings of identical text have a norm of exactly 1.0 on some platforms but a
+    # hair under it (e.g. 0.99999994) on others, so the rescaled score is only ~1.0, not
+    # guaranteed == 1.0.
+    evaluator = EmbeddingRelevanceEvaluator()
     text = "identical text on both sides"
-    result = evaluator.evaluate(RelevanceEvaluatorInput(text, text))
-    assert result.score == pytest.approx(1.0, abs=1e-4)
-    assert result.label == "relevant"
+    evaluator_input = RelevanceEvaluatorInput(text, text)
+    score = evaluator.evaluate(evaluator_input).score
+    assert score == pytest.approx(1.0, abs=1e-4)
+    assert evaluator.evaluate(evaluator_input, threshold=score).label == "relevant"
 
 
 # -- per-call threshold override -------------------------------------------
@@ -371,3 +377,53 @@ def test_evaluate_makes_no_network_calls(
 def test_latency_is_measured_and_non_negative(evaluator: EmbeddingRelevanceEvaluator) -> None:
     result = evaluator.evaluate(RelevanceEvaluatorInput(_RELEVANT_INPUT, _RELEVANT_OUTPUT))
     assert result.evaluation_latency_ms >= 0.0
+
+
+# -- offline model loading (the worker image bakes the model in and sets HF_HUB_OFFLINE=1) ------
+
+
+def _block_sockets(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    attempts: list[str] = []
+
+    def _blocked(*_args: object, **_kwargs: object) -> None:
+        attempts.append("connect")
+        raise AssertionError("attempted a network connection")
+
+    monkeypatch.setattr(socket.socket, "connect", _blocked)
+    monkeypatch.setattr(socket.socket, "connect_ex", _blocked)
+    return attempts
+
+
+def test_construction_from_a_populated_cache_needs_no_network_with_hf_hub_offline(
+    evaluator: EmbeddingRelevanceEvaluator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The production worker image bakes the model into the cache directory at build time and
+    sets HF_HUB_OFFLINE=1: constructing (not just evaluating) must then succeed from that cache
+    alone. Depending on the `evaluator` fixture guarantees the default cache is populated;
+    the new instance below resolves the same cache directory the image's build step fills."""
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    attempts = _block_sockets(monkeypatch)
+
+    offline_evaluator = EmbeddingRelevanceEvaluator()
+    result = offline_evaluator.evaluate(RelevanceEvaluatorInput(_RELEVANT_INPUT, _RELEVANT_OUTPUT))
+
+    assert attempts == []
+    assert isinstance(result, EvaluationResult)
+
+
+def test_empty_cache_with_hf_hub_offline_fails_fast_without_touching_the_network(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing model must be an immediate, loud failure -- not a stall on network retries
+    (fastembed's online path sleeps 3s + 9s + 27s between attempts) that would hold a worker
+    thread far past `evaluator_init_timeout_seconds`. Never downloads: the cache is empty."""
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    attempts = _block_sockets(monkeypatch)
+
+    start = time.monotonic()
+    with pytest.raises(ValueError, match="Could not load model"):
+        EmbeddingRelevanceEvaluator(cache_dir=str(tmp_path))
+    elapsed = time.monotonic() - start
+
+    assert attempts == []
+    assert elapsed < 5.0

@@ -30,6 +30,7 @@ function jsonRequest(body: unknown, contentType = "application/json"): NextReque
 describe("POST /api/auth/login", () => {
   afterEach(() => {
     vi.mocked(login).mockReset();
+    vi.unstubAllEnvs();
   });
 
   it("sets an HttpOnly session cookie on success and never echoes the token in the body", async () => {
@@ -47,6 +48,33 @@ describe("POST /api/auth/login", () => {
 
     const cookie = response.cookies.get("vigil_dashboard_session");
     expect(cookie?.value).toBe("raw-token-value");
+  });
+
+  it("passes no client IP by default (no trusted proxy), even when the browser sent X-Forwarded-For", async () => {
+    vi.mocked(login).mockResolvedValue({ sessionToken: "t", expiresAt: "2099-01-01T00:00:00Z" });
+    const request = new NextRequest("http://localhost/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": "6.6.6.6" },
+      body: JSON.stringify({ email: "owner@example.com", password: "pw" }),
+    });
+
+    await POST(request);
+
+    expect(login).toHaveBeenCalledWith("owner@example.com", "pw", null);
+  });
+
+  it("passes the trusted-proxy-derived client IP, ignoring spoofed left-hand entries", async () => {
+    vi.stubEnv("VIGIL_DASHBOARD_TRUSTED_PROXY_HOPS", "1");
+    vi.mocked(login).mockResolvedValue({ sessionToken: "t", expiresAt: "2099-01-01T00:00:00Z" });
+    const request = new NextRequest("http://localhost/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-forwarded-for": "6.6.6.6, 203.0.113.7" },
+      body: JSON.stringify({ email: "owner@example.com", password: "pw" }),
+    });
+
+    await POST(request);
+
+    expect(login).toHaveBeenCalledWith("owner@example.com", "pw", "203.0.113.7");
   });
 
   it("preserves the upstream status/detail on a failed login", async () => {

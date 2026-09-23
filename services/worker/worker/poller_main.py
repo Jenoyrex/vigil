@@ -19,6 +19,7 @@ from __future__ import annotations
 from worker.clickhouse.client import get_clickhouse_client
 from worker.clickhouse.eligible_span_repository import EligibleSpanRepository
 from worker.config import settings
+from worker.heartbeat import WATCHDOG_STALE_MULTIPLIER
 from worker.logging_config import configure_logging
 from worker.poller import HttpJobCreationClient, Poller
 from worker.postgres.client import get_connection
@@ -56,6 +57,7 @@ def main() -> None:
         poller_overlap_seconds=settings.poller_overlap_seconds,
         poller_start_time_lookback_days=settings.poller_start_time_lookback_days,
         poller_interval_seconds=settings.poller_interval_seconds,
+        watchdog_stale_seconds=settings.heartbeat_stale_seconds * WATCHDOG_STALE_MULTIPLIER,
     )
     poller.run()
 

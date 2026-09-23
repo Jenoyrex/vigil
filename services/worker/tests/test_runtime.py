@@ -187,6 +187,7 @@ def _make_runtime(
     reaper_batch_size: int = 100,
     max_orphaned_evaluator_threads: int = 4,
     heartbeat_callback: Callable[[], None] | None = None,
+    watchdog_stale_seconds: float | None = None,
 ) -> WorkerRuntime:
     kwargs = {}
     if heartbeat_callback is not None:
@@ -201,6 +202,7 @@ def _make_runtime(
         stuck_job_threshold_seconds=stuck_job_threshold_seconds,
         reaper_batch_size=reaper_batch_size,
         max_orphaned_evaluator_threads=max_orphaned_evaluator_threads,
+        watchdog_stale_seconds=watchdog_stale_seconds,
         **kwargs,
     )
 
@@ -697,3 +699,73 @@ def test_default_heartbeat_callback_is_touch_heartbeat() -> None:
     runtime = _make_runtime(dispatcher=FakeDispatcher(), connections=[])
 
     assert runtime._heartbeat_callback is touch_heartbeat
+
+
+# -- stuck-container recovery: heartbeat watchdog ------------------------------
+
+
+class _RecordingWatchdog:
+    """Stands in for `worker.heartbeat.HeartbeatWatchdog` so the runtime's
+    wiring can be observed without a real thread or `os._exit`."""
+
+    instances: list[_RecordingWatchdog] = []
+
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+        self.started = False
+        _RecordingWatchdog.instances.append(self)
+
+    def start(self) -> None:
+        self.started = True
+
+
+def test_watchdog_is_off_by_default(monkeypatch) -> None:
+    _RecordingWatchdog.instances.clear()
+    monkeypatch.setattr("worker.runtime.HeartbeatWatchdog", _RecordingWatchdog)
+    reap_conn = _FakeConnection()
+    reap_conn.queue_result(rows=[])
+    claim_conn = _FakeConnection()
+    claim_conn.queue_result(rows=[])
+    runtime = _make_runtime(dispatcher=FakeDispatcher(), connections=[reap_conn, claim_conn])
+    claim_conn.on_execute = runtime.request_stop
+
+    runtime.run()
+
+    assert _RecordingWatchdog.instances == []
+
+
+def test_watchdog_starts_after_the_first_heartbeat_and_shares_the_stop_event(
+    monkeypatch,
+) -> None:
+    """Started only once the startup heartbeat exists (so startup can never
+    look stale), and given the runtime's own stop event (so a SIGTERM drain
+    is never mistaken for a stuck loop)."""
+    _RecordingWatchdog.instances.clear()
+    call_order: list[str] = []
+
+    class _OrderedWatchdog(_RecordingWatchdog):
+        def start(self) -> None:
+            call_order.append("watchdog-start")
+            super().start()
+
+    monkeypatch.setattr("worker.runtime.HeartbeatWatchdog", _OrderedWatchdog)
+    reap_conn = _FakeConnection(tag="reap", call_order=call_order)
+    reap_conn.queue_result(rows=[])
+    claim_conn = _FakeConnection(tag="claim", call_order=call_order)
+    claim_conn.queue_result(rows=[])
+    runtime = _make_runtime(
+        dispatcher=FakeDispatcher(),
+        connections=[reap_conn, claim_conn],
+        heartbeat_callback=lambda: call_order.append("heartbeat"),
+        watchdog_stale_seconds=360.0,
+    )
+    claim_conn.on_execute = runtime.request_stop
+
+    runtime.run()
+
+    assert call_order[:3] == ["heartbeat", "watchdog-start", "reap"]
+    (watchdog,) = _RecordingWatchdog.instances
+    assert watchdog.started
+    assert watchdog.kwargs["stale_seconds"] == 360.0
+    assert watchdog.kwargs["service"] == "worker"
+    assert watchdog.kwargs["stop_event"] is runtime._stop_event

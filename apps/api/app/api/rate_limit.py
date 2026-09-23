@@ -36,7 +36,7 @@ from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, status
 
-from app.api.deps import AuthenticatedKey, get_current_api_key
+from app.api.deps import AuthenticatedKey, get_current_api_key, get_login_client_key
 from app.config import settings
 
 RETRY_AFTER_HEADER = "Retry-After"
@@ -147,6 +147,11 @@ _login_limiter: RateLimiter[str] = RateLimiter(
     refill_per_second=settings.login_rate_limit_refill_per_second,
     max_tracked_keys=settings.login_rate_limit_max_tracked_ips,
 )
+_login_account_limiter: RateLimiter[str] = RateLimiter(
+    capacity=settings.login_account_rate_limit_capacity,
+    refill_per_second=settings.login_account_rate_limit_refill_per_second,
+    max_tracked_keys=settings.login_account_rate_limit_max_tracked_accounts,
+)
 
 
 def get_ingestion_rate_limiter() -> RateLimiter[uuid.UUID]:
@@ -163,6 +168,10 @@ def get_bootstrap_rate_limiter() -> RateLimiter[str]:
 
 def get_login_rate_limiter() -> RateLimiter[str]:
     return _login_limiter
+
+
+def get_login_account_rate_limiter() -> RateLimiter[str]:
+    return _login_account_limiter
 
 
 def _enforce(auth: AuthenticatedKey, limiter: RateLimiter[uuid.UUID]) -> AuthenticatedKey:
@@ -231,7 +240,7 @@ def require_bootstrap_rate_limit(
 
 
 def require_login_rate_limit(
-    request: Request,
+    client_key: str = Depends(get_login_client_key),
     limiter: RateLimiter[str] = Depends(get_login_rate_limiter),
 ) -> None:
     """Applied to `POST /v1/auth/login` -- same IP-keyed shape as
@@ -241,9 +250,37 @@ def require_login_rate_limit(
     action for legitimate users, not a once-ever operator action, so it
     needs its own, more generous budget -- see
     `app.config.settings.login_rate_limit_*`.
+
+    `client_key` is the end-user IP when apps/dashboard authenticates itself
+    and reports it, else the direct peer -- see `get_login_client_key`.
+    Bootstrap deliberately does not use that: it is operator-to-API direct
+    traffic and keeps keying on the direct peer.
     """
-    client_key = request.client.host if request.client is not None else "unknown"
     retry_after_seconds = limiter.allow(client_key)
+    if retry_after_seconds is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Retry after {retry_after_seconds} seconds.",
+            headers={RETRY_AFTER_HEADER: str(retry_after_seconds)},
+        )
+
+
+def normalize_login_email(email: str) -> str:
+    """The same normalization `app.services.auth.authenticate_and_create_session`
+    uses to look the account up, so exactly the emails that resolve to one
+    account also share one rate-limit bucket."""
+    return email.strip().lower()
+
+
+def enforce_login_account_rate_limit(limiter: RateLimiter[str], email: str) -> None:
+    """Per-account tier for `POST /v1/auth/login`, called by the route
+    handler once the body (and so the email) has been parsed -- a
+    dependency can't take the body without clashing with the handler's own
+    body parameter. Keyed by the attempted email whether or not such an
+    account exists, and consumed on every attempt, so the response never
+    reveals account existence or whether the password was right. Same 429
+    shape as every other tier."""
+    retry_after_seconds = limiter.allow(normalize_login_email(email))
     if retry_after_seconds is not None:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
