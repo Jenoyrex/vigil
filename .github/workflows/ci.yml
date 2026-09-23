@@ -409,7 +409,7 @@ jobs:
       # `corepack prepare pnpm@11.9.0 --activate`) -- there is no root
       # package.json for pnpm/action-setup to auto-detect this from, so it
       # is passed explicitly rather than relying on auto-detection.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 11.9.0
 
