@@ -52,14 +52,16 @@ def test_timeout_error_message_never_includes_the_callables_own_data() -> None:
     """The message must carry only the configured timeout value -- never
     any argument/closure content the wrapped callable happens to use."""
     secret_payload = "sk-super-secret-input-text-do-not-log-me"
+    release = threading.Event()
 
     def _slow_with_captured_data() -> str:
-        time.sleep(5.0)
+        release.wait(timeout=5.0)
         return secret_payload
 
     with pytest.raises(EvaluatorTimeoutError) as excinfo:
         run_with_timeout(_slow_with_captured_data, timeout_seconds=0.05)
 
+    release.set()
     assert secret_payload not in str(excinfo.value)
 
 

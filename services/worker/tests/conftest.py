@@ -11,6 +11,7 @@ fake does too.
 from __future__ import annotations
 
 import os
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -24,6 +25,29 @@ import pytest
 # value under its own VIGIL_API_ prefix, so cross-service tests share one
 # secret.
 os.environ.setdefault("VIGIL_WORKER_INTERNAL_SERVICE_TOKEN", "test-internal-service-token")
+
+
+@pytest.fixture(autouse=True)
+def _no_orphaned_calls_leak_between_tests():
+    """`worker.timeouts`' orphan counter is process-global, and an orphan's
+    decrement lands asynchronously (on its watcher thread) some time after
+    the test that created it releases it. Without this, that late decrement
+    can land inside a *later* test's baseline-vs-assert window and corrupt
+    its count. Every test must therefore finish with every orphan it created
+    fully reaped -- this waits for exactly that (and fails loudly, naming no
+    arbitrary sleep, if a test leaks an orphan it never releases)."""
+    from worker.timeouts import outstanding_orphaned_calls
+
+    before = outstanding_orphaned_calls()
+    yield
+    deadline = time.monotonic() + 10.0
+    while outstanding_orphaned_calls() != before:
+        if time.monotonic() > deadline:
+            raise AssertionError(
+                f"test leaked orphaned run_with_timeout calls: "
+                f"{outstanding_orphaned_calls()} outstanding, expected {before}"
+            )
+        time.sleep(0.005)
 
 
 class FakeChResult:
