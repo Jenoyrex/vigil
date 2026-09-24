@@ -298,7 +298,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/.cache/vigil-evaluator/fastembed
-          key: fastembed-bge-small-en-v1.5-v1
+          key: fastembed-bge-small-en-v1.5-v2
 
       - name: Ruff
         working-directory: services/worker
@@ -344,7 +344,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /home/runner/.cache/vigil-evaluator/fastembed
-          key: fastembed-bge-small-en-v1.5-v1
+          key: fastembed-bge-small-en-v1.5-v2
 
       - name: Ruff
         working-directory: services/evaluator
