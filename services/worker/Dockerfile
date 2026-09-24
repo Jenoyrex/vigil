@@ -24,7 +24,7 @@
 #     --build-context evaluator=services/evaluator \
 #     services/worker
 
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:0.12.7 /uv /usr/local/bin/uv
 
@@ -44,7 +44,7 @@ COPY README.md ./README.md
 RUN uv sync --frozen --no-dev
 
 
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 
 RUN groupadd --system --gid 1000 vigil \
     && useradd --system --uid 1000 --gid vigil --no-create-home vigil

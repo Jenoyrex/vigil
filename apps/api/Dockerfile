@@ -12,7 +12,7 @@
 # keys, and the internal service token are all supplied at `docker run`/
 # `docker compose up` time via environment variables, never baked in here.
 
-FROM python:3.12-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm AS builder
 
 # Pinned uv version, installed as a static binary (no pip/pyproject
 # resolution of uv itself needed).
@@ -36,7 +36,7 @@ COPY README.md ./README.md
 RUN uv sync --frozen --no-dev
 
 
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.14-slim-bookworm AS runtime
 
 RUN groupadd --system --gid 1000 vigil \
     && useradd --system --uid 1000 --gid vigil --no-create-home vigil

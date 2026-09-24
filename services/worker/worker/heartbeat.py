@@ -25,7 +25,7 @@ upper bound, so one iteration completing (and this heartbeat refreshing)
 within a generous, bounded window is a real signal, not a guess.
 
 `HEARTBEAT_PATH` is under `/tmp` deliberately: `/tmp` is world-writable
-(mode 1777) in the `python:3.12-slim-bookworm` base image by design, so the
+(mode 1777) in the `python:3.14-slim-bookworm` base image by design, so the
 non-root `vigil` user (`services/worker/Dockerfile`) can write here with no
 additional `chown`/directory-creation step -- unlike the FastEmbed cache
 directory that same Dockerfile's own Phase 4C review had to fix explicitly

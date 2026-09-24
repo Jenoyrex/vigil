@@ -12,7 +12,7 @@ background jobs, SDK-facing dashboard, or evaluator have been added yet.
 
 ## Requirements
 
-- Python 3.12 (pinned in `.python-version`)
+- Python 3.14 (pinned in `.python-version`)
 - [uv](https://github.com/astral-sh/uv)
 - Docker (for local PostgreSQL and ClickHouse, via `infrastructure/docker-compose.yml`)
 

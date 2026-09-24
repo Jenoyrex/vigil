@@ -39,7 +39,7 @@ permissions:
 # head`, which never imports conftest.py) still sees a consistent value.
 env:
   UV_VERSION: "0.12.7"
-  PYTHON_VERSION: "3.12"
+  PYTHON_VERSION: "3.14"
 
 jobs:
   # ---------------------------------------------------------------------
@@ -367,10 +367,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Deliberately NOT ${{ env.PYTHON_VERSION }}: the SDK runs on users'
+      # own interpreters, so CI tests its lowest supported Python
+      # (requires-python = ">=3.12"), not the API/worker runtime version.
       - uses: astral-sh/setup-uv@v5
         with:
           version: ${{ env.UV_VERSION }}
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: "3.12"
           enable-cache: true
           cache-dependency-glob: packages/sdk-python/uv.lock
 
