@@ -1,0 +1,19 @@
+# Netlify build for apps/dashboard (public preview only; production runs the
+# Docker image -- see docs/decisions/006-deployment-architecture.md).
+#
+# The pnpm workspace has no root package.json, so Netlify's framework
+# detection finds nothing at the repository root ("Detected 0 framework(s)")
+# and never auto-installs its Next.js adapter: the raw .next directory gets
+# published as static files with no server function or middleware. Declaring
+# the adapter explicitly fixes that. It is deliberately not pinned in any
+# package.json, so Netlify keeps it on the latest version, as it recommends.
+#
+# Netlify UI: base directory empty (repo root), package directory
+# apps/dashboard. Paths below are relative to the repo root.
+
+[build]
+  command = "pnpm install --frozen-lockfile && pnpm --filter vigil-dashboard build"
+  publish = "apps/dashboard/.next"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
