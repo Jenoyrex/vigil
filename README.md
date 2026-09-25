@@ -213,12 +213,20 @@ Two GitHub Actions workflows:
   usable against this deployment's config, so this format was chosen instead — see ADR 008).
 - `restore_drill.sh` — restores both backups into a scratch environment to verify they're actually
   usable, not just that the backup commands exited `0`.
+- `scheduled_backup.sh` — the operator-scheduled job tying the above together: both backups into a
+  temporary staging directory, GPG encryption with round-trip verification (`encrypt_and_verify.sh`,
+  passphrase from `BACKUP_ENCRYPTION_PASSPHRASE_FILE`), off-host copy via the operator-supplied
+  `BACKUP_OFFHOST_COMMAND` hook, then retention cleanup (`apply_retention.sh`) — each stage only
+  runs if every earlier one succeeded, and `BACKUP_DIR/.last_success_utc` is written on full
+  success for external staleness monitoring.
+- `test_scheduled_backup.sh` — manual test harness for the scheduled job, run against the local
+  dev stack (not part of CI).
 
-Neither backup script is currently invoked on a schedule by anything in this repository — running
-them (and copying the results off-host) is an operator responsibility today. See
+Nothing in this repository installs the schedule itself — the operator adds the host-level cron
+entry (or systemd timer), keeps the passphrase file backed up separately (losing it makes every
+encrypted backup unrecoverable), and wires `.last_success_utc` into their own monitoring. See
 [`docs/decisions/008-backup-restore.md`](./docs/decisions/008-backup-restore.md) for the full
-strategy and its explicitly-acknowledged open items (scheduling, off-host copy, encryption at
-rest).
+strategy, example cron/systemd entries, retention policy, and the backup failure runbook.
 
 ## Development setup
 
@@ -280,8 +288,9 @@ These are documented, intentional scope decisions as of this phase, not oversigh
   a shared store if `api` is ever horizontally scaled (`apps/api/README.md`'s "Rate limiting").
 - **No metrics/APM endpoint** — structured JSON logs on stdout are the only observability surface
   today (ADR 006).
-- **No automated backup scheduling** — the backup/restore scripts exist and are drill-tested, but
-  nothing in this repository invokes them on a schedule (ADR 008).
+- **Backup scheduling and alerting are operator-installed** — `scheduled_backup.sh` automates
+  backup, encryption, off-host copy, and retention, but the cron/systemd entry that runs it and the
+  staleness alert on `.last_success_utc` are host-level setup outside this repository (ADR 008).
 - **Flat 30-day retention, no tiering** — ClickHouse's `TTL` on both tables is a single fixed
   window; there is no hot/warm/cold tiering or downsampling.
 - **No load-testing tooling** in this repository.
