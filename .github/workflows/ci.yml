@@ -99,7 +99,7 @@ jobs:
       VIGIL_API_INTERNAL_SERVICE_TOKEN: test-internal-service-token
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -210,7 +210,7 @@ jobs:
       VIGIL_EVALUATOR_EMBEDDING_CACHE_DIR: /home/runner/.cache/vigil-evaluator/fastembed
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -324,7 +324,7 @@ jobs:
       VIGIL_EVALUATOR_EMBEDDING_CACHE_DIR: /home/runner/.cache/vigil-evaluator/fastembed
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -365,7 +365,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Deliberately NOT ${{ env.PYTHON_VERSION }}: the SDK runs on users'
       # own interpreters, so CI tests its lowest supported Python
@@ -400,7 +400,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # pnpm must be on PATH before actions/setup-node's cache: pnpm option
       # can detect it, hence this order. Version pinned to match
@@ -471,7 +471,7 @@ jobs:
             build-contexts: "evaluator=services/evaluator"
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v4
 

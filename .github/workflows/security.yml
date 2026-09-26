@@ -64,7 +64,7 @@ jobs:
     name: Trivy filesystem + config scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Reads every apps/*/uv.lock, services/*/uv.lock, packages/*/uv.lock,
       # and the root pnpm-lock.yaml directly -- no `uv sync`/`pnpm install`
