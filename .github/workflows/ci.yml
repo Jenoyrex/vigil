@@ -295,7 +295,7 @@ jobs:
       # same warm cache and never touch the network for this again. This is
       # normal GitHub Actions cache scoping, not a bug in this workflow.
       - name: Restore FastEmbed model cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /home/runner/.cache/vigil-evaluator/fastembed
           key: fastembed-bge-small-en-v1.5-v2
@@ -341,7 +341,7 @@ jobs:
       # that job's step for the full explanation of the key and of
       # cross-job cache-population timing.
       - name: Restore FastEmbed model cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: /home/runner/.cache/vigil-evaluator/fastembed
           key: fastembed-bge-small-en-v1.5-v2
