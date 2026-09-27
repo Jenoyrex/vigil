@@ -214,7 +214,7 @@ eventual/duplicate writes (`ReplacingMergeTree`).
 None of `infrastructure/.env.production`'s contents are recoverable from a database backup.
 Required separately: `POSTGRES_USER`/`PASSWORD`/`DB`, `CLICKHOUSE_USER`/`PASSWORD`/`DB`,
 `VIGIL_API_DATABASE_URL`, `VIGIL_API_CLICKHOUSE_*`, `VIGIL_API_INTERNAL_SERVICE_TOKEN`,
-`VIGIL_API_KEY` (the dashboard's own credential for calling the API), `VIGIL_API_RATE_LIMIT_*`,
+`VIGIL_API_DASHBOARD_CLIENT_IP_TOKEN`, `VIGIL_PUBLIC_API_BASE_URL`, `VIGIL_API_RATE_LIMIT_*`,
 and the `VIGIL_WORKER_*` equivalents. This file must be preserved in its own secure store (a
 password manager or encrypted secrets vault), never committed to Git (already gitignored via this
 repo's `.env`/`.env.*` pattern) and never bundled with a database backup.

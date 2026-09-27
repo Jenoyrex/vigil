@@ -13,9 +13,10 @@ from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.models import APIKey
+from app.db.models import APIKey, OrganizationMembership, Project
 from app.db.session import get_db
 from app.security.api_keys import has_expected_key_shape, hash_api_key
+from app.services.auth import AuthenticatedSession, validate_session
 
 # auto_error=False so we control the error response ourselves: FastAPI's
 # HTTPBearer defaults to 403 on missing/malformed credentials, but ADR-driven
@@ -216,3 +217,80 @@ def get_session_token(
     returns.
     """
     return x_vigil_session_token
+
+
+_INVALID_SESSION_DETAIL = "Invalid or expired session."
+
+
+def _invalid_session() -> HTTPException:
+    return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_INVALID_SESSION_DETAIL)
+
+
+PROJECT_ID_HEADER = "X-Vigil-Project-Id"
+_PROJECT_NOT_FOUND_DETAIL = "Project not found."
+
+
+def get_current_user(
+    session_token: str | None = Depends(get_session_token), db: Session = Depends(get_db)
+) -> AuthenticatedSession:
+    """Session-authenticated identity for the dashboard's workspace routes
+    (app/api/v1/workspace.py) -- a logged-in human, never an API key."""
+    if session_token is None:
+        raise _invalid_session()
+    session = validate_session(db, raw_token=session_token)
+    if session is None:
+        raise _invalid_session()
+    return session
+
+
+def get_project_access(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+    session_token: str | None = Depends(get_session_token),
+    x_vigil_project_id: str | None = Header(default=None, alias=PROJECT_ID_HEADER),
+    db: Session = Depends(get_db),
+) -> AuthenticatedKey:
+    """Project scoping for every customer read/config endpoint (not
+    ingestion, which stays API-key only).
+
+    Two ways in, and `project_id` is always resolved server-side:
+    - `Authorization: Bearer vgl_*` -- exactly `get_current_api_key`.
+    - A dashboard session (`X-Vigil-Session-Token`) plus the project the
+      user is viewing (`X-Vigil-Project-Id`). The project must belong to an
+      organization the session's user is a member of; any other project --
+      nonexistent or another tenant's -- gets the same 404, so a guessed id
+      reveals nothing.
+
+    For a session, `api_key_id` carries the session id: it is only ever used
+    as the rate-limit bucket key (app/api/rate_limit.py), and a session is
+    the caller identity there.
+    """
+    if credentials is not None:
+        return get_current_api_key(credentials, db)
+    if session_token is None:
+        raise _unauthorized(_INVALID_KEY_DETAIL)
+
+    session = validate_session(db, raw_token=session_token)
+    if session is None:
+        raise _invalid_session()
+
+    try:
+        project_id = uuid.UUID(x_vigil_project_id or "")
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=_PROJECT_NOT_FOUND_DETAIL
+        ) from None
+
+    if project_role(db, user_id=session.user_id, project_id=project_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=_PROJECT_NOT_FOUND_DETAIL)
+    return AuthenticatedKey(api_key_id=session.session_id, project_id=project_id)
+
+
+def project_role(db: Session, *, user_id: uuid.UUID, project_id: uuid.UUID) -> str | None:
+    """The user's organization role for the project's organization, or None
+    if the project doesn't exist or the user isn't a member of its org."""
+    return (
+        db.query(OrganizationMembership.role)
+        .join(Project, Project.organization_id == OrganizationMembership.organization_id)
+        .filter(Project.id == project_id, OrganizationMembership.user_id == user_id)
+        .scalar()
+    )

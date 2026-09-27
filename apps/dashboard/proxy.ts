@@ -1,10 +1,10 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-import { getTrace } from "@/lib/api/traces";
+import { apiFetch, PROJECT_ID_HEADER, SESSION_TOKEN_HEADER } from "@/lib/api/http";
 import { deriveStartDate } from "@/lib/traceStartDate";
 import { VigilApiError } from "@/lib/api/types";
-import { SESSION_COOKIE_NAME, validateSession } from "@/lib/api/dashboardAuth";
+import { PROJECT_COOKIE_NAME, SESSION_COOKIE_NAME, validateSession } from "@/lib/api/dashboardAuth";
 
 // Mirrors the CSP this app has always sent (see
 // docs/decisions/007-cors-and-dashboard-security-headers.md) with one
@@ -42,14 +42,21 @@ function buildContentSecurityPolicy(nonce: string): string {
 const LOGIN_PATH = "/login";
 
 /**
- * Reachable without a valid dashboard session (Phase 4D, F1): `/login`
- * itself, and this app's own `/api/auth/**` routes (login/logout), which
- * obviously cannot themselves require the session they establish or tear
- * down. Every other path -- every page, and every `/api/vigil/**` BFF
+ * Reachable without a valid dashboard session: the landing page `/`
+ * (which renders the signed-in overview instead when a session exists --
+ * see app/page.tsx), `/login`, `/signup`, and this app's own
+ * `/api/auth/**` routes (login/signup/logout), which cannot themselves
+ * require the session they establish or tear down. Every other path --
+ * every other page, and every `/api/vigil/**` / `/api/workspace/**` BFF
  * route -- requires one; see the session gate in `proxy()` below.
  */
 function isPublicPath(pathname: string): boolean {
-  return pathname === LOGIN_PATH || pathname.startsWith("/api/auth/");
+  return (
+    pathname === "/" ||
+    pathname === LOGIN_PATH ||
+    pathname === "/signup" ||
+    pathname.startsWith("/api/auth/")
+  );
 }
 
 /**
@@ -141,16 +148,23 @@ export async function proxy(request: NextRequest) {
   }
 
   const match = isPrefetch ? null : /^\/traces\/([^/]+)$/.exec(pathname);
+  // Proxy runs outside the page's request scope, so the pre-check passes
+  // the viewer's credentials explicitly. With no remembered project yet,
+  // skip it -- the page itself resolves the project and handles a 404.
+  const sessionToken = request.cookies.get(SESSION_COOKIE_NAME)?.value;
+  const projectId = request.cookies.get(PROJECT_COOKIE_NAME)?.value;
   let response: NextResponse;
 
-  if (!match) {
+  if (!match || !sessionToken || !projectId) {
     response = NextResponse.next(init);
   } else {
     const traceId = match[1];
     const startParam = request.nextUrl.searchParams.get("start") ?? undefined;
 
     try {
-      await getTrace(traceId, { start_date: deriveStartDate(startParam) });
+      await apiFetch(`/v1/traces/${encodeURIComponent(traceId)}`, { start_date: deriveStartDate(startParam) }, {
+        headers: { [SESSION_TOKEN_HEADER]: sessionToken, [PROJECT_ID_HEADER]: projectId },
+      });
       response = NextResponse.next(init);
     } catch (error) {
       if (error instanceof VigilApiError && error.status === 404) {

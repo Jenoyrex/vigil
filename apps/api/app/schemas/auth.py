@@ -66,3 +66,11 @@ class SessionResponse(BaseModel):
     user_id: uuid.UUID
     email: str
     expires_at: datetime
+
+
+class SignupRequest(BaseModel):
+    email: Email
+    # Account creation, so a real floor -- the same 12-character minimum
+    # BootstrapRequest.owner_password enforces for the bootstrap owner.
+    password: str = Field(min_length=12, max_length=200)
+    full_name: str | None = Field(default=None, max_length=200)

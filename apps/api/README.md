@@ -222,10 +222,15 @@ is safe, but **this API does not provide exactly-once delivery**:
 
 ## Trace Explorer & analytics (read API)
 
-Five read-only `GET` endpoints, all authenticated the same way as ingestion
-(`Authorization: Bearer <api-key>`) and scoped exclusively to the project resolved from that key
--- there is no `project_id` parameter on any of them, so there is nothing a client could supply to
-override tenant scoping even by mistake.
+Five read-only `GET` endpoints, scoped exclusively to one project resolved server-side --
+there is no `project_id` parameter on any of them. They (and the evaluation config/job endpoints)
+accept either credential:
+
+- `Authorization: Bearer <api-key>` -- the key's own project, exactly like ingestion.
+- A dashboard session: `X-Vigil-Session-Token` plus `X-Vigil-Project-Id`. The project must belong
+  to an organization the session's user is a member of; otherwise the response is `404 Project
+  not found.` -- identical for a nonexistent project and another tenant's, so ids reveal nothing
+  (`app.api.deps.get_project_access`). Ingestion (`POST /v1/traces`) never accepts a session.
 
 | Endpoint | Purpose |
 |---|---|
@@ -470,16 +475,9 @@ empty, not just that this one organization is gone.
 
 ### Rotating or revoking the resulting key
 
-There is no HTTP endpoint for this yet — use direct database access, the same way
-`scripts/seed_local_api_key.py`-issued keys are managed today:
-
-```sql
-UPDATE api_keys SET status = 'revoked', revoked_at = now() WHERE id = '<api_key_id>';
-```
-
-Minting a replacement key today also means direct database access (insert a new `api_keys` row
-via `scripts/seed_local_api_key.py`'s pattern, or `psql`) — an HTTP key-management endpoint is
-tracked as a known gap, not solved by this phase.
+Log in to the dashboard as the owner user and use **Settings → API keys** (or the workspace
+endpoints below): create a replacement key, switch your application to it, then revoke the old
+one. Revocation takes effect on the key's next request.
 
 ### Security limitations, explicitly
 
@@ -489,9 +487,9 @@ This is a minimal bootstrap mechanism, not a complete provisioning/identity syst
   `hmac.compare_digest`), not per-operator credentials — anyone with the secret can bootstrap.
 - It rate-limits by client IP (`VIGIL_API_BOOTSTRAP_RATE_LIMIT_*`, in-process, no Redis) to slow
   brute-forcing the secret, not to prevent it outright — use a real, high-entropy secret.
-- It creates exactly one dashboard user, as the organization's `owner` — there is no invite/signup
-  flow to add a second one yet; see "Dashboard authentication" below for what login itself
-  supports today.
+- It creates exactly one dashboard user, as the organization's `owner`. Other people sign up
+  themselves (`POST /v1/auth/signup`) and create their own organizations; there is no invite flow
+  to add them to this one yet.
 - It never accepts a customer `vgl_*` API key as authorization, and a customer key can never
   provision additional organizations/projects/keys through it.
 
@@ -500,13 +498,19 @@ This is a minimal bootstrap mechanism, not a complete provisioning/identity syst
 `POST /v1/auth/login`, `POST /v1/auth/logout`, and `GET /v1/auth/session` (Phase 4D, F1)
 authenticate a human logging into `apps/dashboard`, entirely separate from customer API-key
 authentication above — a `vgl_*` key satisfies neither of these endpoints, and login credentials
-satisfy neither of the `vgl_*`-key-protected endpoints. There is no signup endpoint; the only user
-ever created is bootstrap's owner user (see "Provisioning" above).
+satisfy neither of the `vgl_*`-key-protected endpoints -- except that a session plus a project the
+user belongs to can read that project's data (see "Trace Explorer & analytics" above).
+
+- **`POST /v1/auth/signup`** — `{"email": ..., "password": ..., "full_name": ...?}`. Creates an
+  active user with no organization yet and returns a session exactly like login (`201`). The
+  password must be 12–200 characters and is stored only as its scrypt hash. An email that already
+  has an account (case-insensitive) gets `409`. Shares login's per-IP rate limit. There is no
+  email verification.
 
 - **`POST /v1/auth/login`** — `{"email": ..., "password": ...}`. On success (`200`), returns
   `{"session_token": ..., "expires_at": ...}` — the raw session token, shown exactly once (only
   its SHA-256 hash is persisted, on `dashboard_sessions`). On any failure — unknown email, wrong
-  password, an inactive account, or a user with no organization membership — returns the
+  password, or an inactive account — returns the
   identical generic `401 {"detail": "Invalid email or password."}`, deliberately never revealing
   which. Rate-limited by client IP (`VIGIL_API_LOGIN_RATE_LIMIT_*`, in-process, no Redis — the
   same `RateLimiter` primitive bootstrap uses, a separate, more generous tier).
@@ -529,6 +533,24 @@ Password hashing uses `hashlib.scrypt` (Python stdlib, RFC 7914's interactive-lo
 — never the fast SHA-256 this codebase uses for API keys/session tokens, which are
 server-generated high-entropy secrets, not human-chosen ones. See
 `app/security/passwords.py`/`app/security/sessions.py`.
+
+## Workspace (organizations, projects, API keys)
+
+Session-authenticated (`X-Vigil-Session-Token`; a `vgl_*` key is rejected with `401`), used by
+the dashboard's onboarding and settings (`app/api/v1/workspace.py`):
+
+| Endpoint | Who | Result |
+|---|---|---|
+| `GET /v1/me` | any user | The user, and each organization they belong to with their role and its projects |
+| `POST /v1/organizations` `{"name"}` | any user | New organization; the caller becomes `owner` |
+| `POST /v1/organizations/{id}/projects` `{"name"}` | owner/admin | New project |
+| `GET /v1/projects/{id}/api-keys` | any member | Keys (prefix, status, created/last-used) — never a hash or raw key |
+| `POST /v1/projects/{id}/api-keys` `{"name"}` | owner/admin | New key; `api_key` in the response is the raw key, shown only here |
+| `POST /v1/projects/{id}/api-keys/{key_id}/revoke` | owner/admin | Revokes the key (idempotent) |
+
+A caller who isn't a member of the organization gets `404 Not found.` -- the same as for an id
+that doesn't exist; a `member` attempting an owner/admin action gets `403`. Slugs are derived
+from the name plus a random suffix. Default-tier rate limiting, keyed by session.
 
 ## Logging
 

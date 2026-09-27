@@ -3,16 +3,19 @@ import { NextRequest } from "next/server";
 
 import { VigilApiError } from "@/lib/api/types";
 
-vi.mock("@/lib/api/traces", () => ({
-  getTrace: vi.fn(),
+vi.mock("@/lib/api/http", () => ({
+  apiFetch: vi.fn(),
+  SESSION_TOKEN_HEADER: "X-Vigil-Session-Token",
+  PROJECT_ID_HEADER: "X-Vigil-Project-Id",
 }));
 
 vi.mock("@/lib/api/dashboardAuth", () => ({
   SESSION_COOKIE_NAME: "vigil_dashboard_session",
+  PROJECT_COOKIE_NAME: "vigil_project",
   validateSession: vi.fn(),
 }));
 
-import { getTrace } from "@/lib/api/traces";
+import { apiFetch } from "@/lib/api/http";
 import { validateSession } from "@/lib/api/dashboardAuth";
 
 import { proxy } from "./proxy";
@@ -22,7 +25,7 @@ const VALID_SESSION = { userId: "u1", email: "owner@example.com", expiresAt: "20
 /** A request carrying a session cookie `validateSession` (mocked above) treats as valid by default. */
 function authedRequest(url: string): NextRequest {
   return new NextRequest(url, {
-    headers: { cookie: "vigil_dashboard_session=a-valid-token" },
+    headers: { cookie: "vigil_dashboard_session=a-valid-token; vigil_project=p1" },
   });
 }
 
@@ -42,7 +45,7 @@ describe("proxy()", () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
-    vi.mocked(getTrace).mockReset();
+    vi.mocked(apiFetch).mockReset();
     vi.mocked(validateSession).mockReset();
   });
 
@@ -116,7 +119,7 @@ describe("proxy()", () => {
   describe("trace-detail 404 rewrite (preserved from before the CSP change)", () => {
     it("rewrites to /trace-not-found on a confirmed-missing trace", async () => {
       vi.stubEnv("NODE_ENV", "production");
-      vi.mocked(getTrace).mockRejectedValue(new VigilApiError(404, "Trace not found."));
+      vi.mocked(apiFetch).mockRejectedValue(new VigilApiError(404, "Trace not found."));
 
       const response = await proxy(authedRequest("http://localhost/traces/abc123"));
 
@@ -125,7 +128,7 @@ describe("proxy()", () => {
 
     it("falls through unchanged on a found trace", async () => {
       vi.stubEnv("NODE_ENV", "production");
-      vi.mocked(getTrace).mockResolvedValue({} as never);
+      vi.mocked(apiFetch).mockResolvedValue({} as never);
 
       const response = await proxy(authedRequest("http://localhost/traces/abc123"));
 
@@ -134,7 +137,7 @@ describe("proxy()", () => {
 
     it("falls through unchanged on a non-404 upstream error", async () => {
       vi.stubEnv("NODE_ENV", "production");
-      vi.mocked(getTrace).mockRejectedValue(new VigilApiError(503, "Unable to reach the telemetry API."));
+      vi.mocked(apiFetch).mockRejectedValue(new VigilApiError(503, "Unable to reach the telemetry API."));
 
       const response = await proxy(authedRequest("http://localhost/traces/abc123"));
 
@@ -143,17 +146,35 @@ describe("proxy()", () => {
 
     it("still carries the CSP nonce on a rewritten response", async () => {
       vi.stubEnv("NODE_ENV", "production");
-      vi.mocked(getTrace).mockRejectedValue(new VigilApiError(404, "Trace not found."));
+      vi.mocked(apiFetch).mockRejectedValue(new VigilApiError(404, "Trace not found."));
 
       const response = await proxy(authedRequest("http://localhost/traces/abc123"));
 
       expect(response.headers.get("Content-Security-Policy")).toMatch(/'nonce-[A-Za-z0-9+/=]+'/);
     });
 
-    it("does not touch getTrace for non-trace-detail routes", async () => {
+    it("does not call the API for non-trace-detail routes", async () => {
       vi.stubEnv("NODE_ENV", "production");
       await proxy(authedRequest("http://localhost/evaluations"));
-      expect(getTrace).not.toHaveBeenCalled();
+      expect(apiFetch).not.toHaveBeenCalled();
+    });
+
+    it("pre-checks the trace as the viewer: session + remembered project", async () => {
+      vi.mocked(apiFetch).mockResolvedValue({} as never);
+      await proxy(authedRequest("http://localhost/traces/abc123"));
+      expect(vi.mocked(apiFetch).mock.calls[0][2]?.headers).toEqual({
+        "X-Vigil-Session-Token": "a-valid-token",
+        "X-Vigil-Project-Id": "p1",
+      });
+    });
+
+    it("skips the pre-check when no project is remembered yet", async () => {
+      const request = new NextRequest("http://localhost/traces/abc123", {
+        headers: { cookie: "vigil_dashboard_session=a-valid-token" },
+      });
+      const response = await proxy(request);
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(response.headers.get("x-middleware-rewrite")).toBeNull();
     });
   });
 
@@ -186,15 +207,24 @@ describe("proxy()", () => {
 
     it("redirects when the cookie is present but the API rejects it (expired/revoked)", async () => {
       vi.mocked(validateSession).mockResolvedValue(null);
-      const response = await proxy(authedRequest("http://localhost/"));
+      const response = await proxy(authedRequest("http://localhost/traces"));
       expect(response.status).toBe(307);
       expect(new URL(response.headers.get("location") ?? "").pathname).toBe("/login");
     });
 
     it("passes through to CSP/trace logic once the cookie validates", async () => {
-      const response = await proxy(authedRequest("http://localhost/"));
+      const response = await proxy(authedRequest("http://localhost/traces"));
       expect(response.status).not.toBe(307);
       expect(validateSession).toHaveBeenCalledWith("a-valid-token");
+    });
+
+    it("never gates the landing page or /signup (both render for signed-out visitors)", async () => {
+      for (const path of ["/", "/signup", "/api/auth/signup"]) {
+        const response = await proxy(new NextRequest(`http://localhost${path}`));
+        expect(response.status).not.toBe(307);
+        expect(response.status).not.toBe(401);
+      }
+      expect(validateSession).not.toHaveBeenCalled();
     });
 
     it("never gates /login itself", async () => {

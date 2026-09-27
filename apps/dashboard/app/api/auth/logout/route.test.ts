@@ -4,6 +4,7 @@ import { NextRequest } from "next/server";
 vi.mock("@/lib/api/dashboardAuth", () => ({
   logout: vi.fn(),
   SESSION_COOKIE_NAME: "vigil_dashboard_session",
+  PROJECT_COOKIE_NAME: "vigil_project",
 }));
 
 import { logout } from "@/lib/api/dashboardAuth";

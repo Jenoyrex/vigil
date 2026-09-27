@@ -12,6 +12,9 @@ import { titleForStatus } from "@/lib/errorMessages";
 
 import { EvaluatorConfigForm } from "./EvaluatorConfigForm";
 
+/** Evaluators the worker has installed (services/worker/worker/registry.py). */
+const KNOWN_EVALUATORS = ["relevance", "relevance_embedding"] as const;
+
 interface FetchError {
   status: number;
   message: string;
@@ -107,8 +110,17 @@ export function EvaluatorConfigsPanel({
     <div className="space-y-4">
       {configs.length === 0 && addingName === null ? (
         <EmptyState
-          title="No evaluators configured"
-          description="Evaluation is opt-in and off by default. Configure an evaluator to start scoring telemetry."
+          title="No evaluators enabled"
+          description="Enable an evaluator to start measuring response quality. Start with relevance: it's fast and scores every sampled LLM response against its input."
+          action={
+            <div className="flex flex-wrap justify-center gap-2">
+              {KNOWN_EVALUATORS.map((name) => (
+                <Button key={name} variant={name === "relevance" ? "primary" : "secondary"} onClick={() => setAddingName(name)}>
+                  Set up {name}
+                </Button>
+              ))}
+            </div>
+          }
         />
       ) : (
         configs.map((config) => (

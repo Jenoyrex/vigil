@@ -1,5 +1,6 @@
 import { EvaluationsView } from "@/components/evaluations/EvaluationsView";
 import { listEvaluationJobs, listEvaluatorConfigs } from "@/lib/api/evaluations";
+import { requireProject } from "@/lib/api/workspace";
 import {
   VigilApiError,
   type EvaluationJobListResponse,
@@ -44,6 +45,7 @@ export default async function EvaluationsPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  await requireProject();
   const resolvedSearchParams = await searchParams;
   const tabParam = resolvedSearchParams.tab;
   const initialTab = tabParam === "jobs" ? "jobs" : "config";
