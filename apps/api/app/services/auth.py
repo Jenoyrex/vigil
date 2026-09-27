@@ -19,10 +19,11 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.db.models import DashboardSession, OrganizationMembership, User
-from app.security.passwords import DUMMY_HASH_FOR_TIMING, verify_password
+from app.db.models import DashboardSession, User
+from app.security.passwords import DUMMY_HASH_FOR_TIMING, hash_password, verify_password
 from app.security.sessions import generate_session_token, hash_session_token
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ def authenticate_and_create_session(
     """Verify email/password and, on success, issue a new session.
 
     Returns `None` for every failure case -- unknown email, wrong
-    password, inactive user, or a user with no organization membership --
+    password, or inactive user --
     so the caller (app/api/v1/auth.py) always responds with an identical
     generic message regardless of which condition actually failed, never
     revealing which one it was.
@@ -70,29 +71,55 @@ def authenticate_and_create_session(
         logger.info("dashboard login failed")
         return None
 
-    has_membership = (
-        db.query(OrganizationMembership.id)
-        .filter(OrganizationMembership.user_id == user.id)
-        .first()
-        is not None
-    )
-    if not has_membership:
-        logger.info(
-            "dashboard login failed: no organization membership",
-            extra={"user_id": str(user.id)},
-        )
-        return None
+    # No organization membership is required: a newly signed-up user logs in
+    # before creating one, and the dashboard routes them to onboarding.
+    # Tenant data is still unreachable without membership -- every
+    # project-scoped route checks it (app.api.deps.get_project_access).
+    return _create_session(db, user_id=user.id, session_ttl_hours=session_ttl_hours)
 
+
+class EmailAlreadyRegisteredError(Exception):
+    """`register_user_and_create_session`: the email already has an account."""
+
+
+def register_user_and_create_session(
+    db: Session,
+    *,
+    email: str,
+    password: str,
+    full_name: str | None,
+    session_ttl_hours: int,
+) -> LoginResult:
+    """Self-serve signup (`POST /v1/auth/signup`): create an active user with
+    no organization yet, and log them in. The password is only ever stored
+    as its scrypt hash. Raises `EmailAlreadyRegisteredError` for a taken
+    email -- including one lost to a concurrent signup, which the
+    `lower(email)` unique index catches."""
+    normalized = email.strip().lower()
+    if db.query(User.id).filter(func.lower(User.email) == normalized).first() is not None:
+        raise EmailAlreadyRegisteredError
+    user = User(email=normalized, full_name=full_name, hashed_password=hash_password(password))
+    db.add(user)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise EmailAlreadyRegisteredError from exc
+    logger.info("dashboard user signed up", extra={"user_id": str(user.id)})
+    return _create_session(db, user_id=user.id, session_ttl_hours=session_ttl_hours)
+
+
+def _create_session(db: Session, *, user_id: UUID, session_ttl_hours: int) -> LoginResult:
     raw_token, token_hash = generate_session_token()
     expires_at = datetime.now(UTC) + timedelta(hours=session_ttl_hours)
 
-    session = DashboardSession(user_id=user.id, token_hash=token_hash, expires_at=expires_at)
+    session = DashboardSession(user_id=user_id, token_hash=token_hash, expires_at=expires_at)
     db.add(session)
     db.commit()
 
     logger.info(
-        "dashboard login succeeded",
-        extra={"user_id": str(user.id), "session_id": str(session.id)},
+        "dashboard session created",
+        extra={"user_id": str(user_id), "session_id": str(session.id)},
     )
 
     return LoginResult(session_token=raw_token, expires_at=expires_at)

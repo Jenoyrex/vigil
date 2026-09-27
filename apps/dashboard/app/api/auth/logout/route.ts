@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 
-import { logout, SESSION_COOKIE_NAME } from "@/lib/api/dashboardAuth";
+import { logout, PROJECT_COOKIE_NAME, SESSION_COOKIE_NAME } from "@/lib/api/dashboardAuth";
 
 /**
  * POST /api/auth/logout (Phase 4D, F1). Idempotent, mirroring apps/api's
@@ -19,5 +19,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const response = new NextResponse(null, { status: 204 });
   response.cookies.delete(SESSION_COOKIE_NAME);
+  response.cookies.delete(PROJECT_COOKIE_NAME);
   return response;
 }

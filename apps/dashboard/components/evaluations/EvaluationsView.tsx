@@ -80,7 +80,15 @@ export function EvaluationsView({
 
   return (
     <div className="space-y-4">
-      <h1 className="text-lg font-semibold text-foreground">Evaluations</h1>
+      <div className="space-y-1">
+        <h1 className="text-lg font-semibold text-foreground">Evaluations</h1>
+        <p className="max-w-3xl text-sm text-muted">
+          Vigil scores the response of every sampled llm span against its input. Available today: relevance (a fast
+          TF-IDF baseline) and relevance_embedding (a local bge-small embedding model). Both run on Vigil&apos;s own
+          workers, and results appear on each span in the trace view. Groundedness and faithfulness evaluators are not
+          available yet.
+        </p>
+      </div>
 
       <div
         role="tablist"

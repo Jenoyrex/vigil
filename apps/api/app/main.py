@@ -7,6 +7,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.evaluations import router as evaluations_router
 from app.api.v1.provisioning import router as provisioning_router
 from app.api.v1.traces import router as traces_router
+from app.api.v1.workspace import router as workspace_router
 from app.clickhouse.client import get_clickhouse_client
 from app.config import settings
 from app.db.session import ping_database
@@ -49,6 +50,7 @@ app.include_router(analytics_router)
 app.include_router(evaluations_router)
 app.include_router(provisioning_router)
 app.include_router(auth_router)
+app.include_router(workspace_router)
 
 
 class HealthResponse(BaseModel):

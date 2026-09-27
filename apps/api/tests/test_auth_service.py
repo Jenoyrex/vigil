@@ -95,20 +95,21 @@ def test_authenticate_and_create_session_rejects_inactive_user(
     assert result is None
 
 
-def test_authenticate_and_create_session_rejects_user_with_no_membership(
+def test_authenticate_and_create_session_allows_user_with_no_membership_yet(
     db_session: Session,
 ) -> None:
+    """A self-signed-up user logs in before creating an organization; the
+    dashboard sends them to onboarding. Tenant data stays gated by
+    membership on every project-scoped route (see test_workspace_api.py)."""
     password = "correct horse battery staple"
-    user = User(
-        email="orphan@example.com", hashed_password=hash_password(password), is_active=True
-    )
+    user = User(email="orphan@example.com", hashed_password=hash_password(password), is_active=True)
     db_session.add(user)
     db_session.commit()
 
     result = authenticate_and_create_session(
         db_session, email=user.email, password=password, session_ttl_hours=12
     )
-    assert result is None
+    assert result is not None
 
 
 def test_authenticate_and_create_session_rejects_user_with_no_password_set(

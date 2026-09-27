@@ -1,9 +1,13 @@
+import { redirect } from "next/navigation";
 import { Suspense } from "react";
 
+import { Landing } from "@/components/landing/Landing";
+import { firstTraceGate } from "@/components/onboarding/firstTraceGate";
 import { OverviewView } from "@/components/overview/OverviewView";
 import { SkeletonStatTiles, SkeletonTable } from "@/components/ui/Skeleton";
 import { getLlmUsageAnalytics, getSpanAnalytics } from "@/lib/api/analytics";
 import { listTraces } from "@/lib/api/traces";
+import { getWorkspace } from "@/lib/api/workspace";
 import { VigilApiError, type LlmUsageResponse, type SpanAnalyticsResponse, type TraceListResponse } from "@/lib/api/types";
 import { bucketForPreset, DEFAULT_TIME_RANGE_PRESET, resolveTimeRange } from "@/lib/time-range";
 
@@ -28,6 +32,22 @@ function settledError<T>(result: PromiseSettledResult<T>): FetchError | null {
 }
 
 /**
+ * `/` is public (see proxy.ts): signed-out visitors get the landing page;
+ * a signed-in user without a project goes to onboarding; a project with no
+ * traces yet gets the first-trace state instead of empty tiles.
+ */
+export default async function HomePage() {
+  const workspace = await getWorkspace();
+  if (!workspace) return <Landing />;
+  if (!workspace.currentProject) redirect("/onboarding");
+
+  const gate = await firstTraceGate(workspace.currentProject, "Overview");
+  if (gate) return gate;
+
+  return <OverviewPage />;
+}
+
+/**
  * An explicit Suspense boundary here (rather than a file-convention
  * app/loading.tsx) deliberately keeps this page's loading fallback local
  * to "/": a root-level loading.tsx wraps every nested route lacking its
@@ -37,7 +57,7 @@ function settledError<T>(result: PromiseSettledResult<T>): FetchError | null {
  * app/trace-not-found/page.tsx). The fallback UI is unchanged from the
  * former app/loading.tsx.
  */
-export default function OverviewPage() {
+function OverviewPage() {
   return (
     <Suspense
       fallback={

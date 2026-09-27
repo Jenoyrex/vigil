@@ -6,6 +6,7 @@ import { VigilApiError } from "@/lib/api/types";
 vi.mock("@/lib/api/dashboardAuth", () => ({
   login: vi.fn(),
   SESSION_COOKIE_NAME: "vigil_dashboard_session",
+  PROJECT_COOKIE_NAME: "vigil_project",
   sessionCookieOptions: (expiresAt: string) => ({
     httpOnly: true,
     secure: false,
@@ -25,6 +26,12 @@ function jsonRequest(body: unknown, contentType = "application/json"): NextReque
     headers: { "content-type": contentType },
     body: JSON.stringify(body),
   });
+}
+
+/** A delete is a Set-Cookie with an empty value that expires immediately. */
+function clearsProjectCookie(response: Response): boolean {
+  const header = response.headers.getSetCookie().find((c) => c.startsWith("vigil_project="));
+  return header !== undefined && /^vigil_project=;/.test(header) && /Expires=Thu, 01 Jan 1970|Max-Age=0/i.test(header);
 }
 
 describe("POST /api/auth/login", () => {
@@ -48,6 +55,25 @@ describe("POST /api/auth/login", () => {
 
     const cookie = response.cookies.get("vigil_dashboard_session");
     expect(cookie?.value).toBe("raw-token-value");
+  });
+
+  it("clears a previous user's project cookie on success, keeping the new session cookie", async () => {
+    vi.mocked(login).mockResolvedValue({ sessionToken: "raw-token-value", expiresAt: "2099-01-01T00:00:00Z" });
+    const request = jsonRequest({ email: "owner@example.com", password: "hunter2hunter2" });
+    request.cookies.set("vigil_project", "someone-elses-project");
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(200);
+    expect(clearsProjectCookie(response)).toBe(true);
+    expect(response.cookies.get("vigil_dashboard_session")?.value).toBe("raw-token-value");
+  });
+
+  it("leaves the project cookie alone when login fails", async () => {
+    vi.mocked(login).mockRejectedValue(new VigilApiError(401, "Invalid email or password."));
+    const response = await POST(jsonRequest({ email: "owner@example.com", password: "wrong-password" }));
+    expect(response.status).toBe(401);
+    expect(response.headers.getSetCookie().some((c) => c.startsWith("vigil_project="))).toBe(false);
   });
 
   it("passes no client IP by default (no trusted proxy), even when the browser sent X-Forwarded-For", async () => {

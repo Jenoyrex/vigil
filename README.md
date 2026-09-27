@@ -10,6 +10,54 @@ This README describes the system as it exists in this repository today. See
 [`docs/decisions/`](./docs/decisions) for the architecture decision records (ADRs) explaining *why*
 it's built this way, and each component's own README (linked below) for full operational detail.
 
+## Getting started (using Vigil)
+
+What a new user does in the dashboard — every step is a real write to `apps/api`:
+
+1. **Sign up** at the dashboard's `/signup` (email + password, 12+ characters). This creates a
+   user and logs you in. There is no email verification yet.
+2. **Create an organization** — you become its `owner`.
+3. **Create a project** — one per AI application. Onboarding offers to enable the `relevance`
+   evaluator for it (sampling every `llm` span); you can change that under **Evaluations**.
+4. **Connect your app** (`/connect`) — create a project API key (`vgl_…`, shown once, stored only
+   as a SHA-256 hash), then install the Python SDK and send a trace:
+
+   ```bash
+   pip install "git+https://github.com/Jenoyrex/vigil.git#subdirectory=packages/sdk-python"
+   export VIGIL_API_KEY="vgl_…"            # server-side only; never ship it in browser code
+   export VIGIL_BASE_URL="https://<your-vigil-api>"
+   ```
+
+   ```python
+   from vigil import Vigil
+
+   vigil = Vigil(service_name="my-llm-app")
+   with vigil.start_span("answer question", span_type="llm") as span:
+       span.set_input(question)
+       answer = call_your_model(question)
+       span.set_output(answer)
+       span.record_llm_usage(provider="openai", model="gpt-4o-mini")
+   vigil.flush()
+   ```
+
+   Any language can instead `POST /v1/traces` directly with `Authorization: Bearer <key>` (see
+   `examples/telemetry/sample-trace-request.json`). The Connect page can also send one real,
+   labeled test trace through ingestion with your new key.
+5. **Watch it arrive** — the Connect page and every empty dashboard page poll for the first trace
+   and switch to the real view when it lands. With an evaluator enabled, the poller creates an
+   evaluation job for each sampled `llm` span, the worker scores it, and the result (score,
+   label, explanation) appears on that span in the trace view and in **Evaluations → Jobs**.
+
+**How evaluations work:** evaluation is opt-in per project. `relevance` (TF-IDF baseline) and
+`relevance_embedding` (local `bge-small` embeddings) score how relevant an `llm` span's output is
+to its input, on Vigil's own workers — prompts are never sent to a third-party model. Groundedness
+and faithfulness evaluators do not exist yet.
+
+**Tenancy:** a user sees only projects of organizations they belong to. The dashboard holds no
+API key; it calls the API as the signed-in user for the selected project, and the API checks that
+membership on every call. Settings shows API keys (create/revoke) and your role; inviting
+teammates is not built yet.
+
 ## Repository layout
 
 ```
@@ -68,13 +116,19 @@ API).
 - **Telemetry ingestion** — `POST /v1/traces`, authenticated by a customer API key
   (`Authorization: Bearer vgl_<prefix>.<secret>`), writes to ClickHouse synchronously.
 - **Trace Explorer / analytics (read API)** — `GET /v1/traces*`, `GET /v1/analytics/*`, scoped
-  exclusively to the authenticated key's project.
+  exclusively to one project: the authenticated key's, or — for a dashboard session — the
+  `X-Vigil-Project-Id` project, only if the user is a member of its organization.
 - **Evaluation config/query API** — `GET`/`PUT /v1/evaluations/configs*`,
   `GET /v1/evaluations/jobs`, `GET /v1/traces/{trace_id}/spans/{span_id}/evaluations`, plus an
   internal, worker-only `POST /v1/evaluations/jobs` (authenticated by a separate shared
   `X-Vigil-Internal-Token`, not a customer key).
-- **Dashboard authentication** — `POST /v1/auth/login`, `POST /v1/auth/logout`,
-  `GET /v1/auth/session`, entirely separate from customer API-key auth.
+- **Dashboard authentication** — `POST /v1/auth/signup`, `POST /v1/auth/login`,
+  `POST /v1/auth/logout`, `GET /v1/auth/session`, entirely separate from customer API-key auth.
+- **Workspace (session-authenticated)** — `GET /v1/me`, `POST /v1/organizations`,
+  `POST /v1/organizations/{id}/projects`, `GET`/`POST /v1/projects/{id}/api-keys`,
+  `POST /v1/projects/{id}/api-keys/{key_id}/revoke`: self-serve onboarding. Every id is checked
+  against the caller's memberships (a non-member gets `404`); creating projects/keys needs the
+  `owner` or `admin` role.
 - **Provisioning** — `POST /v1/provisioning/bootstrap`, a one-time, secret-gated way to create the
   first organization/project/API key/dashboard owner without direct database access.
 - **Rate limiting** — an in-process, per-API-key token bucket (`app/api/rate_limit.py`); separate
@@ -85,10 +139,11 @@ variable — is in [`apps/api/README.md`](./apps/api/README.md).
 
 ### Dashboard (`apps/dashboard`)
 
-A Next.js app: a login page backed by dashboard-session auth, a trace list/detail view, an
-analytics view, and an evaluations view (job list + per-evaluator configuration). It never talks
-to the ingestion API's write path or holds a customer API key in the browser — the dashboard's own
-server process calls `apps/api` directly (`lib/api/vigilClient.ts`, server-only, never bundled to
+A Next.js app: a public landing page, signup/login, onboarding (organization → project →
+connect your app, with API-key creation and an SDK quickstart), and — per selected project — an
+overview, trace list/detail, analytics, evaluations (job list + per-evaluator configuration) and
+settings (API keys). It holds no customer API key: its server process calls `apps/api` as the
+signed-in user for the selected project (`lib/api/vigilClient.ts`, server-only, never bundled to
 the client), and `proxy.ts` re-validates the dashboard session on every gated request.
 
 ### Python SDK (`packages/sdk-python`)
@@ -151,7 +206,8 @@ Two entirely separate authentication systems, neither of which satisfies the oth
 - **Dashboard sessions** — email/password login (`hashlib.scrypt` hashing), a server-generated
   session token (`X-Vigil-Session-Token`, SHA-256 hashed at rest, HttpOnly/Secure/SameSite=Strict
   cookie on the dashboard side), re-validated on every gated dashboard request, 12-hour default
-  lifetime, no signup endpoint — the only dashboard user ever created is provisioning's owner user.
+  lifetime. Self-serve signup (`POST /v1/auth/signup`) creates users; provisioning's owner user is
+  just the first one.
 
 Full detail in `apps/api/README.md`'s "Provisioning" and "Dashboard authentication" sections.
 
@@ -240,7 +296,7 @@ up everything at once. Start with the component's own README:
    `uv run uvicorn app.main:app --reload`, mint a local API key with
    `uv run python scripts/seed_local_api_key.py`.
 3. **Dashboard** — `apps/dashboard/README.md` for its own dev-server instructions; point it at the
-   local API via `VIGIL_API_BASE_URL`/`VIGIL_API_KEY`.
+   local API via `VIGIL_API_BASE_URL`, then sign up in the browser.
 4. **Worker/poller** — `services/worker/README.md`.
 5. **Python SDK** — `packages/sdk-python/README.md`; see `examples/python-sdk/basic.py` for a
    runnable end-to-end example against a local API.
@@ -294,9 +350,10 @@ These are documented, intentional scope decisions as of this phase, not oversigh
 - **Flat 30-day retention, no tiering** — ClickHouse's `TTL` on both tables is a single fixed
   window; there is no hot/warm/cold tiering or downsampling.
 - **No load-testing tooling** in this repository.
-- **No HTTP endpoint yet to rotate/revoke an API key or create a second dashboard user** — both
-  require direct database access today (`apps/api/README.md`'s "Provisioning" section documents
-  the exact SQL).
+- **No team invitations or member management** — an organization's only member is the user who
+  created it (plus, for the bootstrapped organization, its owner). Adding members still requires
+  direct database access.
+- **No email verification or password reset** for self-serve accounts.
 
 ## License
 

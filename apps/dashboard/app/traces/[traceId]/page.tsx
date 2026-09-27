@@ -6,6 +6,7 @@ import { ErrorBanner } from "@/components/ui/ErrorBanner";
 import { titleForStatus } from "@/lib/errorMessages";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { getTrace } from "@/lib/api/traces";
+import { requireProject } from "@/lib/api/workspace";
 import { deriveStartDate } from "@/lib/traceStartDate";
 import { VigilApiError, type TraceDetailResponse } from "@/lib/api/types";
 
@@ -16,6 +17,7 @@ export default async function TraceDetailPage({
   params: Promise<{ traceId: string }>;
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  await requireProject();
   const { traceId } = await params;
   const resolvedSearchParams = await searchParams;
   const startParam =

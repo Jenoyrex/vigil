@@ -1,4 +1,6 @@
+import { firstTraceGate } from "@/components/onboarding/firstTraceGate";
 import { TracesExplorer } from "@/components/traces/TracesExplorer";
+import { requireProject } from "@/lib/api/workspace";
 import { listTraces } from "@/lib/api/traces";
 import { VigilApiError, type TraceListResponse } from "@/lib/api/types";
 import { searchParamsToTraceFilters, TRACE_LIST_PAGE_SIZE } from "@/lib/search-params";
@@ -14,6 +16,10 @@ export default async function TracesPage({
 }: {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
+  const { currentProject } = await requireProject();
+  const gate = await firstTraceGate(currentProject, "Traces");
+  if (gate) return gate;
+
   const filters = searchParamsToTraceFilters(await searchParams);
   const range = resolveTimeRange(filters.range);
 

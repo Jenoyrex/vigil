@@ -1,109 +1,48 @@
 import "server-only";
 
-import { buildQueryString, type QueryParams } from "./queryString";
-import { extractDetailMessage, VigilApiError, type ApiErrorBody } from "./types";
-
-/**
- * The only place the Vigil API key ever exists in this application.
- *
- * `import "server-only"` (above) makes the Next.js build fail if this
- * module is ever imported, even transitively, by a Client Component --
- * that's its entire purpose, and is why this module holds the key rather
- * than each caller reading `process.env` directly. Both env vars are
- * server-only by convention (no `NEXT_PUBLIC_` prefix), so even a build
- * misconfiguration can't leak them into client-bundled code.
- *
- * Callers are: Server Components (app/**\/page.tsx, fetching directly for
- * the initial render) and the app/api/vigil/** route handlers (the
- * same-origin BFF proxy Client Components fetch from for interactive
- * filter/pagination changes). Nothing else should import this file.
- */
-
-function requireEnv(name: "VIGIL_API_BASE_URL" | "VIGIL_API_KEY"): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(
-      `${name} is not configured. Set it as a server-side environment variable ` +
-        `(never NEXT_PUBLIC_${name}) before starting the dashboard.`,
-    );
-  }
-  return value;
-}
+import { apiFetch, PROJECT_ID_HEADER, SESSION_TOKEN_HEADER, type QueryParams } from "./http";
+import { requireCurrentProject } from "./workspace";
 
 export type { QueryParams };
 
 /**
- * Optional request body for a mutating call (currently only
- * `PUT /v1/evaluations/configs/{evaluator_name}`). Omitted entirely ->
- * plain `GET`, identical to every call site that predates this option --
- * see `vigilFetch`'s own reasoning below for why this is additive, not a
- * rewrite.
+ * Project-scoped calls to apps/api (traces, analytics, evaluations), made
+ * as the signed-in user for the project they're currently viewing: the
+ * dashboard session token plus `X-Vigil-Project-Id`. apps/api checks that
+ * the user belongs to that project's organization on every call
+ * (app.api.deps.get_project_access) -- this app never holds a shared API
+ * key that could read every tenant's data.
+ *
+ * Callers are Server Components (initial render) and the app/api/vigil/**
+ * route handlers (the same-origin BFF Client Components fetch from).
  */
+
+export interface VigilAuth {
+  sessionToken: string;
+  projectId: string;
+}
+
 export interface VigilFetchInit {
   method?: "PUT";
   body?: unknown;
+  /** Explicit credentials -- e.g. configuring a project created in this same request. */
+  auth?: VigilAuth;
 }
 
-/**
- * Fetch one path from the real Vigil API, attaching the server-side API
- * key. Never called from client code -- see the module docstring above.
- *
- * `init` is an additive, optional third parameter: every pre-existing call
- * site (`vigilFetch(path, params)`, implicitly `GET`) is untouched by this
- * signature change. Only a caller that explicitly passes
- * `{ method: "PUT", body }` gets a JSON-encoded request body and a
- * `Content-Type` header -- see `lib/api/evaluations.ts`'s
- * `upsertEvaluatorConfig`, the one caller that does.
- *
- * Deliberately does not log the request URL's query string, the request or
- * response body, or any header: query params can contain user-supplied
- * filter text, and request/response bodies are telemetry or configuration
- * content (see "Avoid logging telemetry payloads or credentials" in the BFF
- * proxy requirements). On failure, only the path and status code are
- * logged.
- */
+async function currentAuth(): Promise<VigilAuth> {
+  const { sessionToken, currentProject } = await requireCurrentProject();
+  return { sessionToken, projectId: currentProject.id };
+}
+
 export async function vigilFetch<T>(
   path: string,
   params?: QueryParams,
   init?: VigilFetchInit,
 ): Promise<T> {
-  const baseUrl = requireEnv("VIGIL_API_BASE_URL");
-  const apiKey = requireEnv("VIGIL_API_KEY");
-
-  const url = `${baseUrl.replace(/\/+$/, "")}${path}${buildQueryString(params)}`;
-
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: init?.method,
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        ...(init?.body !== undefined ? { "Content-Type": "application/json" } : {}),
-      },
-      body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
-      // Telemetry/configuration data changes continuously; never serve a
-      // stale cached response for a dashboard view, and never cache a
-      // mutating request.
-      cache: "no-store",
-    });
-  } catch {
-    // Network-level failure (DNS, connection refused, timeout). Never
-    // include the underlying error, which could echo the target URL/host.
-    console.error(`vigil api: network error calling ${path}`);
-    throw new VigilApiError(503, "Unable to reach the telemetry API. Please retry.");
-  }
-
-  if (!response.ok) {
-    let detail: string | undefined;
-    try {
-      const body = (await response.json()) as ApiErrorBody;
-      detail = extractDetailMessage(body.detail);
-    } catch {
-      // Non-JSON error body -- fall through to the generic message below.
-    }
-    console.error(`vigil api: ${path} responded ${response.status}`);
-    throw new VigilApiError(response.status, detail ?? "The telemetry API returned an error.");
-  }
-
-  return (await response.json()) as T;
+  const auth = init?.auth ?? (await currentAuth());
+  return apiFetch<T>(path, params, {
+    method: init?.method,
+    body: init?.body,
+    headers: { [SESSION_TOKEN_HEADER]: auth.sessionToken, [PROJECT_ID_HEADER]: auth.projectId },
+  });
 }

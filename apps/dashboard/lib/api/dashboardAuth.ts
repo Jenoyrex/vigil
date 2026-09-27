@@ -4,24 +4,20 @@ import { VigilApiError, extractDetailMessage, type ApiErrorBody } from "./types"
 
 /**
  * Calls apps/api's dashboard-user authentication endpoints
- * (POST /v1/auth/login, POST /v1/auth/logout, GET /v1/auth/session).
+ * (POST /v1/auth/login, POST /v1/auth/signup, POST /v1/auth/logout,
+ * GET /v1/auth/session).
  *
- * Deliberately a separate module from lib/api/vigilClient.ts: that module
- * holds the one server-side project API key (`VIGIL_API_KEY`) every
- * telemetry/analytics/evaluations call uses, completely independent of
- * which -- or whether any -- dashboard user is logged in. This module
- * never reads or sends that key, and vigilClient.ts never reads or sends
- * a session token. Presenting a session token to a vigilClient.ts-proxied
- * route, or the project API key to one of these functions, authenticates
- * nothing on either side -- see apps/api/app/api/v1/auth.py's module
- * docstring for the same separation on the server.
+ * The session token these issue is the dashboard's only credential: every
+ * telemetry/analytics/evaluations call (lib/api/vigilClient.ts) presents it
+ * together with the viewed project's id, and apps/api checks the user's
+ * membership in that project's organization on each call. The dashboard
+ * holds no customer API key.
  *
  * Callers: proxy.ts (session validation gate, on every protected
- * request), app/api/auth/login/route.ts, app/api/auth/logout/route.ts.
+ * request), app/api/auth/{login,signup,logout}/route.ts.
  * `import "server-only"` above makes the build fail if this module is
- * ever imported, even transitively, by a Client Component -- the same
- * guard vigilClient.ts uses, for the same reason: nothing here should
- * ever reach browser-bundled code.
+ * ever imported, even transitively, by a Client Component: nothing here
+ * should ever reach browser-bundled code.
  */
 
 const SESSION_TOKEN_HEADER = "X-Vigil-Session-Token";
@@ -33,6 +29,9 @@ const SESSION_TOKEN_HEADER = "X-Vigil-Session-Token";
  * cookie, HttpOnly (see `sessionCookieOptions` below), never the header.
  */
 export const SESSION_COOKIE_NAME = "vigil_dashboard_session";
+
+/** The project the user is viewing -- a preference only; see lib/api/workspace.ts. */
+export const PROJECT_COOKIE_NAME = "vigil_project";
 
 /**
  * Cookie attributes for the session cookie, set by
@@ -92,14 +91,34 @@ export interface SessionInfo {
 /**
  * POST /v1/auth/login. Throws VigilApiError(401, "Invalid email or
  * password.") on any failure -- apps/api never distinguishes unknown
- * email / wrong password / inactive account / missing membership in its
- * response, and this function passes that generic message straight
- * through rather than adding its own guesswork on top.
+ * email / wrong password / inactive account in its response, and this
+ * function passes that generic message straight through rather than
+ * adding its own guesswork on top.
  */
-export async function login(
+export function login(
   email: string,
   password: string,
   clientIp: string | null = null,
+): Promise<LoginResult> {
+  return requestSession("/v1/auth/login", { email, password }, clientIp);
+}
+
+/**
+ * POST /v1/auth/signup -- creates the account and returns its first
+ * session, exactly like login. apps/api's errors (409 duplicate email, 422
+ * validation, 429 rate limit) pass straight through.
+ */
+export function signup(
+  body: { email: string; password: string; full_name?: string },
+  clientIp: string | null = null,
+): Promise<LoginResult> {
+  return requestSession("/v1/auth/signup", body, clientIp);
+}
+
+async function requestSession(
+  path: "/v1/auth/login" | "/v1/auth/signup",
+  body: Record<string, string | undefined>,
+  clientIp: string | null,
 ): Promise<LoginResult> {
   const baseUrl = requireApiBaseUrl();
 
@@ -115,14 +134,14 @@ export async function login(
 
   let response: Response;
   try {
-    response = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/auth/login`, {
+    response = await fetch(`${baseUrl.replace(/\/+$/, "")}${path}`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify(body),
       cache: "no-store",
     });
   } catch {
-    console.error("dashboard auth: network error calling /v1/auth/login");
+    console.error(`dashboard auth: network error calling ${path}`);
     throw new VigilApiError(503, "Unable to reach the authentication service. Please retry.");
   }
 
@@ -130,8 +149,8 @@ export async function login(
     throw await toVigilApiError(response);
   }
 
-  const body = (await response.json()) as { session_token: string; expires_at: string };
-  return { sessionToken: body.session_token, expiresAt: body.expires_at };
+  const result = (await response.json()) as { session_token: string; expires_at: string };
+  return { sessionToken: result.session_token, expiresAt: result.expires_at };
 }
 
 /**

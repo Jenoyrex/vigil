@@ -45,3 +45,22 @@ export function getSpan(
     params,
   );
 }
+
+/** The widest window GET /v1/traces allows (apps/api `max_query_window_days`). */
+export const TRACE_LOOKBACK_DAYS = 7;
+
+/**
+ * Whether the current project has received any trace in the last
+ * `TRACE_LOOKBACK_DAYS` -- what decides between a page's real view and the
+ * "waiting for your first trace" state. One single-row query.
+ */
+export async function hasRecentTrace(): Promise<boolean> {
+  const to = new Date();
+  const from = new Date(to.getTime() - TRACE_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  const result = await listTraces({
+    start_time_from: from.toISOString(),
+    start_time_to: to.toISOString(),
+    limit: 1,
+  });
+  return result.traces.length > 0;
+}

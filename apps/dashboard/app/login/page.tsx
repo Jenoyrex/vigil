@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
 import { LoginForm } from "@/components/auth/LoginForm";
 
@@ -36,11 +37,19 @@ export default async function LoginPage({
   return (
     <div className="flex flex-1 items-center justify-center py-12">
       <div className="w-full max-w-sm space-y-6">
-        <div className="space-y-1 text-center">
-          <p className="font-mono text-lg font-semibold text-foreground">vigil</p>
-          <p className="text-sm text-muted">Log in to continue</p>
+        <div className="space-y-1.5 text-center">
+          <Link href="/" className="font-mono text-lg font-semibold text-foreground">
+            vigil
+          </Link>
+          <h1 className="text-xl font-semibold tracking-tight text-foreground">Log in</h1>
         </div>
         <LoginForm nextPath={nextPath} />
+        <p className="text-center text-sm text-muted">
+          New to Vigil?{" "}
+          <Link href="/signup" className="font-medium text-accent hover:underline">
+            Create an account
+          </Link>
+        </p>
       </div>
     </div>
   );

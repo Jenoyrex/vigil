@@ -1,4 +1,6 @@
 import { AnalyticsView } from "@/components/analytics/AnalyticsView";
+import { firstTraceGate } from "@/components/onboarding/firstTraceGate";
+import { requireProject } from "@/lib/api/workspace";
 
 /**
  * Each panel manages its own range/filter/mode state and fetches directly
@@ -17,6 +19,14 @@ import { AnalyticsView } from "@/components/analytics/AnalyticsView";
 // React #412 streaming-script failure this causes).
 export const dynamic = "force-dynamic";
 
-export default function AnalyticsPage() {
+export default async function AnalyticsPage() {
+  const { currentProject } = await requireProject();
+  const gate = await firstTraceGate(
+    currentProject,
+    "Analytics",
+    "Analytics appear once your application sends traces: span volume, error rate, latency percentiles and LLM token usage, all from real data.",
+  );
+  if (gate) return gate;
+
   return <AnalyticsView />;
 }

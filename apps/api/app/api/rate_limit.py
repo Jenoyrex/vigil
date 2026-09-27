@@ -36,8 +36,15 @@ from dataclasses import dataclass
 
 from fastapi import Depends, HTTPException, Request, status
 
-from app.api.deps import AuthenticatedKey, get_current_api_key, get_login_client_key
+from app.api.deps import (
+    AuthenticatedKey,
+    get_current_api_key,
+    get_current_user,
+    get_login_client_key,
+    get_project_access,
+)
 from app.config import settings
+from app.services.auth import AuthenticatedSession
 
 RETRY_AFTER_HEADER = "Retry-After"
 
@@ -205,13 +212,24 @@ def require_ingestion_rate_limit(
 
 
 def require_default_rate_limit(
-    auth: AuthenticatedKey = Depends(get_current_api_key),
+    auth: AuthenticatedKey = Depends(get_project_access),
     limiter: RateLimiter[uuid.UUID] = Depends(get_default_rate_limiter),
 ) -> AuthenticatedKey:
-    """Drop-in replacement for `Depends(get_current_api_key)` on every
-    authenticated customer endpoint other than `POST /v1/traces`. See
-    `require_ingestion_rate_limit`."""
+    """Used by every authenticated customer endpoint other than
+    `POST /v1/traces`: authenticates by API key *or* dashboard session +
+    project (`app.api.deps.get_project_access`), then enforces the default
+    rate limit. See `require_ingestion_rate_limit`."""
     return _enforce(auth, limiter)
+
+
+def require_session_rate_limit(
+    session: AuthenticatedSession = Depends(get_current_user),
+    limiter: RateLimiter[uuid.UUID] = Depends(get_default_rate_limiter),
+) -> AuthenticatedSession:
+    """Session-authenticated workspace routes (app/api/v1/workspace.py):
+    the default tier, keyed by session id."""
+    _enforce(AuthenticatedKey(api_key_id=session.session_id, project_id=session.user_id), limiter)
+    return session
 
 
 def require_bootstrap_rate_limit(
