@@ -126,7 +126,7 @@ jobs:
             runner: ubuntu-24.04-arm
             arch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-buildx-action@v4
 
@@ -314,7 +314,7 @@ jobs:
       # far HEAD has since moved. See
       # docs/decisions/006-deployment-architecture.md, decision 13.
       - name: Check out deployed commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ steps.image.outputs.commit }}
 
