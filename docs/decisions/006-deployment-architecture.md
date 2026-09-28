@@ -253,6 +253,29 @@ later phases.
       actual outcome, not its existence. `ci_gate` (and therefore `publish`) is skipped entirely
       when `image_tag` is supplied to `workflow_dispatch`, since a rollback-only run publishes
       nothing new for CI to have validated.
+    - **Multi-architecture images: `linux/amd64` and `linux/arm64`, native builds, one manifest.**
+      Every published `ghcr.io/<owner>/vigil-{api,dashboard,worker}` tag is a multi-architecture
+      manifest list, so the same tag runs on an x86 host or an arm64 host (e.g. an ARM VM) with
+      no Compose-level change -- `docker-compose.prod.yml` pins no `platform:`, and each host
+      pulls its own architecture from the manifest. The two architectures are built independently
+      by a `build` job (image x platform matrix): `linux/amd64` on `ubuntu-latest`, `linux/arm64`
+      on GitHub's native public ARM runner (`ubuntu-24.04-arm`, free for this public repository)
+      -- no QEMU emulation anywhere, which matters for the two build steps that actually execute
+      target-architecture code: the worker's model bake-and-offline-load check (decision 12) and
+      the dashboard's Next.js build. Each `build` leg pushes its image **by digest only, with no
+      tag**, and hands the digest to the `publish` job, which merges exactly the two platform
+      digests into one manifest list (`docker buildx imagetools create`), applies the unchanged
+      tag set above -- `sha-<commit>` remains the only deployable tag -- and fails unless that
+      `sha-<commit>` tag then resolves to both `linux/amd64` and `linux/arm64`. A tag therefore
+      exists only once *both* architectures have built; a failed leg leaves nothing tagged.
+      `deploy` depends on `ci_gate`, `build`, and `publish`, and refuses to run if any of them
+      failed or was cancelled (a failed `build` leg alone would otherwise only *skip* `publish`);
+      on a rollback-only dispatch all three are skipped, exactly as before. The worker's BGE model
+      (decision 12) is baked into **each architecture-specific image** by that image's own native
+      build, verified present and loadable with `HF_HUB_OFFLINE=1` on that architecture, and
+      loaded offline at runtime -- every Python dependency in `apps/api/uv.lock` and
+      `services/worker/uv.lock` ships a prebuilt Linux aarch64 wheel, so the arm64 build compiles
+      nothing from source.
     - **Deploy: `workflow_dispatch` only, the `production` Environment, non-overlapping.** `deploy`
       is skipped unconditionally for every `push` event, however it completes -- the only trigger
       that can run it is an operator's manual dispatch. It runs under the `production` GitHub

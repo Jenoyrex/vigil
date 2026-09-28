@@ -86,22 +86,26 @@ jobs:
           done
 
   # ---------------------------------------------------------------------
-  # Build and push all three images, tagged with the immutable
-  # sha-<40-char-commit> tag (the only tag the deploy job may use),
-  # the sanitized branch name, and -- master only -- `latest`. Same build
+  # Build all three images for linux/amd64 and linux/arm64, each platform
+  # on a native runner (no QEMU: the worker's BGE bake-and-offline-load
+  # step and the dashboard's Next.js build run on real hardware for both
+  # architectures). Each leg pushes its image by digest only -- no tag is
+  # written here, so a partially-built commit never gets a tag. Same build
   # contexts as ci.yml's docker-build matrix, unchanged.
   # ---------------------------------------------------------------------
-  publish:
-    name: Publish (${{ matrix.name }})
+  build:
+    name: Build (${{ matrix.name }}, ${{ matrix.platform }})
     needs: ci_gate
     if: needs.ci_gate.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     strategy:
       fail-fast: false
       matrix:
+        name: [vigil-api, vigil-dashboard, vigil-worker]
+        platform: [linux/amd64, linux/arm64]
         include:
           - name: vigil-api
             context: apps/api
@@ -115,6 +119,12 @@ jobs:
             context: services/worker
             dockerfile: services/worker/Dockerfile
             build-contexts: "evaluator=services/evaluator"
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -122,6 +132,75 @@ jobs:
 
       # GHCR requires an all-lowercase image path; github.repository_owner
       # preserves whatever case the account/org actually has.
+      - name: Lowercase image owner
+        id: owner
+        run: echo "lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Labels only; tags are applied once, to the multi-arch manifest, in
+      # the publish job below.
+      - uses: docker/metadata-action@v6
+        id: meta
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/${{ matrix.name }}
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          build-contexts: ${{ matrix.build-contexts }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/${{ matrix.name }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.name }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}-${{ matrix.arch }}
+
+      - name: Export digest
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          digest='${{ steps.build.outputs.digest }}'
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.name }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---------------------------------------------------------------------
+  # Merge each image's amd64 + arm64 digests into one multi-arch manifest
+  # list and tag it with the immutable sha-<40-char-commit> tag (the only
+  # tag the deploy job may use), the sanitized branch name, and -- master
+  # only -- `latest`. Same tag scheme as before multi-arch; a single tag
+  # now resolves to the right architecture on any pulling host.
+  # ---------------------------------------------------------------------
+  publish:
+    name: Publish (${{ matrix.name }})
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [vigil-api, vigil-dashboard, vigil-worker]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.name }}-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
       - name: Lowercase image owner
         id: owner
         run: echo "lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
@@ -141,16 +220,36 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
 
-      - uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
-          build-contexts: ${{ matrix.build-contexts }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.name }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+      - name: Create and push multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/${{ matrix.name }}
+        run: |
+          set -euo pipefail
+          digests=(*)
+          if [ "${#digests[@]}" -ne 2 ]; then
+            echo "::error::expected 2 platform digests for $IMAGE, found: ${digests[*]}"
+            exit 1
+          fi
+          mapfile -t tag_args < <(jq -r '.tags[] | "-t", .' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          if [ "${#tag_args[@]}" -eq 0 ]; then
+            echo "::error::no tags resolved for $IMAGE"
+            exit 1
+          fi
+          docker buildx imagetools create "${tag_args[@]}" "${digests[@]/#/$IMAGE@sha256:}"
+
+      - name: Verify both platforms are published
+        env:
+          REF: ${{ env.REGISTRY }}/${{ steps.owner.outputs.lc }}/${{ matrix.name }}:sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "$REF"
+          platforms=$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' \
+            | jq -r '[.manifests[].platform | select(.os != "unknown") | .os + "/" + .architecture] | sort | join(",")')
+          if [ "$platforms" != "linux/amd64,linux/arm64" ]; then
+            echo "::error::$REF has platforms '$platforms', expected linux/amd64,linux/arm64"
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------
   # Manual-only. Never runs on a plain push to master. Deploys exactly one
@@ -162,16 +261,18 @@ jobs:
   # ---------------------------------------------------------------------
   deploy:
     name: Deploy to production
-    needs: [ci_gate, publish]
+    needs: [ci_gate, build, publish]
     # `needs.*` wildcard traversal doesn't exist in GitHub Actions
     # expressions, so each job's result is checked explicitly. `always()`
     # is required here because the default implicit `if` (`success()`)
-    # treats a *skipped* need as failing too -- and ci_gate/publish are
-    # deliberately skipped (not failed) on a rollback-only dispatch.
+    # treats a *skipped* need as failing too -- and ci_gate/build/publish
+    # are deliberately skipped (not failed) on a rollback-only dispatch.
+    # `build` is checked too: a failed build leg only *skips* publish.
     if: |
       always() &&
       github.event_name == 'workflow_dispatch' &&
       needs.ci_gate.result != 'failure' && needs.ci_gate.result != 'cancelled' &&
+      needs.build.result != 'failure' && needs.build.result != 'cancelled' &&
       needs.publish.result != 'failure' && needs.publish.result != 'cancelled'
     runs-on: ubuntu-latest
     environment: production
