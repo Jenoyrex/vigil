@@ -10,6 +10,11 @@ This README describes the system as it exists in this repository today. See
 [`docs/decisions/`](./docs/decisions) for the architecture decision records (ADRs) explaining *why*
 it's built this way, and each component's own README (linked below) for full operational detail.
 
+**[Live Demo](https://vigiljr.netlify.app)** — sign up with a throwaway email, create a project, and
+send a test trace from the browser. The demo runs on a separate zero-cost backend
+([`apps/demo-api/`](./apps/demo-api), Cloudflare Workers + D1) and deletes inactive accounts after
+30 days; see [ADR 009](./docs/decisions/009-public-demo-architecture.md).
+
 ## Getting started (using Vigil)
 
 What a new user does in the dashboard — every step is a real write to `apps/api`:
