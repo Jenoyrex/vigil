@@ -1,0 +1,22 @@
+{
+  // Vigil public demo API. See README.md and docs/decisions/009-public-demo-architecture.md.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vigil-demo-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-22",
+  "workers_dev": true,
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vigil-demo",
+      // Replace with the id printed by `wrangler d1 create vigil-demo`.
+      "database_id": "818854a1-e3ad-4735-a81e-effd00a80c8e",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // Daily cleanup of demo data older than the retention window (src/cleanup.ts).
+  "triggers": { "crons": ["17 3 * * *"] },
+  "observability": { "enabled": true }
+  // Secret (set with `wrangler secret put DASHBOARD_CLIENT_IP_TOKEN`), must equal
+  // the dashboard's VIGIL_API_DASHBOARD_CLIENT_IP_TOKEN.
+}

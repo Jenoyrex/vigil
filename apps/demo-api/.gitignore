@@ -1,0 +1,5 @@
+.wrangler/
+node_modules/
+# Local Worker secrets read by `wrangler dev` (e.g. DASHBOARD_CLIENT_IP_TOKEN).
+.dev.vars
+.dev.vars.*

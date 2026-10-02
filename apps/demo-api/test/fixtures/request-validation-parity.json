@@ -1,0 +1,172 @@
+{
+ "cases": [
+  {
+   "model": "SignupRequest",
+   "body": {
+    "email": "  User@Example.COM ",
+    "password": "correct horse battery"
+   },
+   "parsed": {
+    "email": "user@example.com",
+    "password": "correct horse battery",
+    "full_name": null
+   }
+  },
+  {
+   "model": "SignupRequest",
+   "body": {
+    "email": "not-an-email",
+    "password": "short"
+   },
+   "errors": [
+    {
+     "type": "value_error",
+     "loc": [
+      "body",
+      "email"
+     ],
+     "msg": "Value error, must be a valid email address."
+    },
+    {
+     "type": "string_too_short",
+     "loc": [
+      "body",
+      "password"
+     ],
+     "msg": "String should have at least 12 characters"
+    }
+   ]
+  },
+  {
+   "model": "SignupRequest",
+   "body": {
+    "email": "a@b.co",
+    "password": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "full_name": "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+   },
+   "errors": [
+    {
+     "type": "string_too_long",
+     "loc": [
+      "body",
+      "password"
+     ],
+     "msg": "String should have at most 200 characters"
+    },
+    {
+     "type": "string_too_long",
+     "loc": [
+      "body",
+      "full_name"
+     ],
+     "msg": "String should have at most 200 characters"
+    }
+   ]
+  },
+  {
+   "model": "SignupRequest",
+   "body": {
+    "password": "correct horse battery"
+   },
+   "errors": [
+    {
+     "type": "missing",
+     "loc": [
+      "body",
+      "email"
+     ],
+     "msg": "Field required"
+    }
+   ]
+  },
+  {
+   "model": "SignupRequest",
+   "body": {
+    "email": "a b@c.de",
+    "password": "correct horse battery"
+   },
+   "errors": [
+    {
+     "type": "value_error",
+     "loc": [
+      "body",
+      "email"
+     ],
+     "msg": "Value error, must be a valid email address."
+    }
+   ]
+  },
+  {
+   "model": "LoginRequest",
+   "body": {
+    "email": "a@b.co",
+    "password": ""
+   },
+   "errors": [
+    {
+     "type": "string_too_short",
+     "loc": [
+      "body",
+      "password"
+     ],
+     "msg": "String should have at least 1 character"
+    }
+   ]
+  },
+  {
+   "model": "NameRequest",
+   "body": {
+    "name": "   "
+   },
+   "errors": [
+    {
+     "type": "string_too_short",
+     "loc": [
+      "body",
+      "name"
+     ],
+     "msg": "String should have at least 1 character"
+    }
+   ]
+  },
+  {
+   "model": "NameRequest",
+   "body": {
+    "name": "  Acme  "
+   },
+   "parsed": {
+    "name": "Acme"
+   }
+  },
+  {
+   "model": "NameRequest",
+   "body": {
+    "name": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+   },
+   "errors": [
+    {
+     "type": "string_too_long",
+     "loc": [
+      "body",
+      "name"
+     ],
+     "msg": "String should have at most 200 characters"
+    }
+   ]
+  },
+  {
+   "model": "NameRequest",
+   "body": {},
+   "errors": [
+    {
+     "type": "missing",
+     "loc": [
+      "body",
+      "name"
+     ],
+     "msg": "Field required"
+    }
+   ]
+  }
+ ]
+}

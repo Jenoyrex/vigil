@@ -24,6 +24,13 @@ export default async function SignupPage() {
             Then set up a project and send your first trace in a few minutes.
           </p>
         </div>
+        {process.env.VIGIL_DEMO_MODE === "true" && (
+          <p role="note" className="rounded-md border border-border px-3 py-2 text-sm text-muted">
+            This is a public demo. Use a throwaway email and a password you don&apos;t use anywhere
+            else — demo accounts use lighter password hashing and are deleted after 30 days of
+            inactivity.
+          </p>
+        )}
         <SignupForm />
       </div>
     </div>
