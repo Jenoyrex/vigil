@@ -125,8 +125,8 @@ describe("Live Demo journey through the dashboard's /v1 contract", () => {
         spans: [{
           trace_id: traceId, span_id: spanId, parent_span_id: null, name: "onboarding test trace", span_type: "llm",
           start_time: start.toISOString(), end_time: end.toISOString(), status: "ok",
-          input: "What does Vigil do for an LLM application?",
-          output: "Vigil records traces from an LLM application and evaluates whether each response is relevant to its input.",
+          input: "What is the capital of France?",
+          output: "The capital of France is Paris.",
           environment: "onboarding-test",
         }],
       },
@@ -152,7 +152,8 @@ describe("Live Demo journey through the dashboard's /v1 contract", () => {
     expectShape(results.body, "SpanEvaluationsResponse");
     expectShape(results.body.results[0], "EvaluationResultOut");
     expect(results.body.results[0].evaluator_name).toBe("relevance");
-    expect(results.body.results[0].score).toBeGreaterThan(0);
+    expect(results.body.results[0].score).toBeCloseTo(0.7093, 4);
+    expect(results.body.results[0].label).toBe("relevant");
     const jobs = await callJson("GET", "/v1/evaluations/jobs", auth);
     expectShape(jobs.body, "EvaluationJobListResponse");
     expectShape(jobs.body.jobs[0], "EvaluationJobOut");

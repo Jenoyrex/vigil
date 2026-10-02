@@ -51,9 +51,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             start_time: start.toISOString(),
             end_time: end.toISOString(),
             status: "ok",
-            input: "What does Vigil do for an LLM application?",
-            output:
-              "Vigil records traces from an LLM application and evaluates whether each response is relevant to its input.",
+            input: "What is the capital of France?",
+            output: "The capital of France is Paris.",
             environment: "onboarding-test",
           },
         ],
