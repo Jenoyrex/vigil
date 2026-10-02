@@ -15,6 +15,26 @@ send a test trace from the browser. The demo runs on a separate zero-cost backen
 ([`apps/demo-api/`](./apps/demo-api), Cloudflare Workers + D1) and deletes inactive accounts after
 30 days; see [ADR 009](./docs/decisions/009-public-demo-architecture.md).
 
+## At a glance
+
+- **What it is:** self-hostable tracing and evaluation for LLM applications: a Python SDK, an
+  ingestion API, a dashboard, and a background worker that scores LLM output.
+- **Why it exists:** LLM calls are hard to debug from logs alone. Vigil records each call as a span
+  (input, output, model, token usage) and scores outputs automatically, so problems are visible per
+  span instead of buried in log lines.
+- **Key technical decisions:**
+  - ClickHouse for high-volume span telemetry, PostgreSQL for control-plane data (organizations,
+    projects, keys, evaluation jobs) ([ADR 003](./docs/decisions/003-clickhouse-telemetry-storage.md)).
+  - Evaluation jobs are claimed from PostgreSQL with `SELECT ... FOR UPDATE SKIP LOCKED`, with
+    retry/backoff, dead-lettering, and a reaper for jobs orphaned by a crashed worker
+    ([ADR 005](./docs/decisions/005-evaluation-job-storage-worker.md)).
+  - Evaluators (TF-IDF baseline, local `bge-small` embeddings) run on Vigil's own workers; prompts
+    are never sent to a third-party model ([ADR 004](./docs/decisions/004-evaluation-engine.md)).
+  - Two separate authentication systems: hashed project API keys for ingestion and the read API,
+    session cookies for the dashboard (see [Authentication](#authentication)).
+- **Try it:** the [live demo](https://vigiljr.netlify.app) (separate zero-cost backend, ADR 009), or
+  run it locally via [Development setup](#development-setup).
+
 ## Getting started (using Vigil)
 
 What a new user does in the dashboard — every step is a real write to `apps/api`:
@@ -86,7 +106,7 @@ infrastructure/          Docker Compose for local dev and production, ClickHouse
                         Postgres init, and backup/restore scripts. See "Deployment" below.
 
 docs/
-  decisions/             Architecture decision records (ADRs 001-008).
+  decisions/             Architecture decision records (ADRs 001-009).
 
 examples/
   python-sdk/            A runnable end-to-end example using packages/sdk-python.

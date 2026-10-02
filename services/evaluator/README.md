@@ -3,18 +3,15 @@
 Evaluation algorithms for Vigil, per `docs/decisions/004-evaluation-engine.md` ("ADR 004"). This
 package is the `services/evaluator` half of ADR 004's service boundary: it owns evaluation
 **algorithms only**. It has no knowledge of a job queue, PostgreSQL, ClickHouse, HTTP, or any
-Vigil-internal model — it does not import from, or get imported by, `apps/api`, `services/worker`,
-or the dashboard. Given plain evaluator input, it returns a plain evaluator result. Nothing else.
+Vigil-internal model — it does not import from `apps/api`, `services/worker`, or the dashboard.
+Given plain evaluator input, it returns a plain evaluator result. Nothing else.
 
-**This milestone builds the evaluator interface and the V1 relevance evaluator only.** No job
-infrastructure, no storage, no worker, no API changes, no dashboard changes — see ADR 004 section
-10 for why: this evaluator has to be validated against benchmark data *before* anything is built to
-depend on it, which is the next milestone, not this one.
+Its only caller is `services/worker`, which depends on this package by local path and runs the
+evaluators registered in `services/worker/worker/registry.py` against sampled spans. Job
+infrastructure, storage, and scheduling all live there, not here.
 
 ## What this package is not (yet)
 
-- **Not connected to anything.** No caller exists yet. `services/worker` — the thing that will
-  eventually call `RelevanceEvaluator.evaluate()` in production — has not been built.
 - **Not benchmark-validated.** The small labeled examples in `tests/test_relevance.py` verify the
   evaluator *behaves as designed* (correct score bounds, deterministic, handles edge cases). They
   are not a benchmark and must not be read as evidence of real-world accuracy — see "Known
@@ -53,7 +50,7 @@ test) would otherwise need to import.
 
 Deliberately **excluded**: `evaluation_id`, `project_id`, `trace_id`, `span_id`, `created_at`. Those
 identify *where* a result belongs once persisted against a specific span — a storage/job concern for
-whatever calls an evaluator (`services/worker`, not yet built), not something a pure text-scoring
+whatever calls an evaluator (`services/worker`), not something a pure text-scoring
 function has any business knowing. This is the "do not unnecessarily couple the interface to
 database models" requirement, applied concretely.
 
@@ -153,8 +150,8 @@ rescaling.
   treated as accurate or calibrated until that validation exists.**
 - **`evaluate()` also accepts an optional, keyword-only per-call `threshold`** (see `interface.py`'s
   `Evaluator.evaluate` docstring), which overrides the constructor's threshold for that one call
-  only and never mutates the instance. This is how `services/worker` (not yet built) is expected to
-  apply one project's configured `evaluator_configs.threshold` against a single, expensively-shared
+  only and never mutates the instance. This is how `services/worker` applies one
+  project's configured `evaluator_configs.threshold` against a single, expensively-shared
   evaluator instance — see docs/decisions/005-evaluation-job-storage-worker.md's threshold-resolution
   amendment. `threshold=None` (every call before this parameter existed, and any call that still
   omits it) means "use this instance's own constructor-time default" — unchanged behavior.
