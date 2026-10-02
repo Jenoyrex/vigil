@@ -18,7 +18,8 @@ send a test trace from the browser. The demo runs on a separate zero-cost backen
 ## At a glance
 
 - **What it is:** self-hostable tracing and evaluation for LLM applications: a Python SDK, an
-  ingestion API, a dashboard, and a background worker that scores LLM output.
+  ingestion API, a dashboard, a background worker that scores LLM output, and an offline benchmark
+  harness for the evaluators it runs.
 - **Why it exists:** LLM calls are hard to debug from logs alone. Vigil records each call as a span
   (input, output, model, token usage) and scores outputs automatically, so problems are visible per
   span instead of buried in log lines.
@@ -30,6 +31,10 @@ send a test trace from the browser. The demo runs on a separate zero-cost backen
     ([ADR 005](./docs/decisions/005-evaluation-job-storage-worker.md)).
   - Evaluators (TF-IDF baseline, local `bge-small` embeddings) run on Vigil's own workers; prompts
     are never sent to a third-party model ([ADR 004](./docs/decisions/004-evaluation-engine.md)).
+  - Both evaluators were benchmarked offline on the public WikiQA dataset, with the threshold
+    selected on the validation split and results reported on the held-out test split (test F1
+    0.1710 for TF-IDF, 0.3735 for embeddings). These are dataset results, not measurements on real
+    LLM traffic ([details](./services/evaluator/README.md#offline-validation-wikiqa)).
   - Two separate authentication systems: hashed project API keys for ingestion and the read API,
     session cookies for the dashboard (see [Authentication](#authentication)).
 - **Try it:** the [live demo](https://vigiljr.netlify.app) (separate zero-cost backend, ADR 009), or
@@ -184,7 +189,9 @@ application. Full detail in [`packages/sdk-python/README.md`](./packages/sdk-pyt
 A standalone library of evaluators (currently `RelevanceEvaluator` and
 `EmbeddingRelevanceEvaluator`), each matching the `Evaluator` protocol
 (`name`, `version`, `evaluate(input) -> EvaluationResult`). It has no dependency on storage, HTTP,
-or a job queue — `services/worker` is what actually calls it in production. See
+or a job queue — `services/worker` is what actually calls it in production. It also contains an
+offline WikiQA benchmark harness (`services/evaluator/validation/`) with committed reports for both
+evaluators. See
 [`services/evaluator/README.md`](./services/evaluator/README.md) and
 [`docs/decisions/004-evaluation-engine.md`](./docs/decisions/004-evaluation-engine.md).
 

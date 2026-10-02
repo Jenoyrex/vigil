@@ -12,10 +12,11 @@ infrastructure, storage, and scheduling all live there, not here.
 
 ## What this package is not (yet)
 
-- **Not benchmark-validated.** The small labeled examples in `tests/test_relevance.py` verify the
-  evaluator *behaves as designed* (correct score bounds, deterministic, handles edge cases). They
-  are not a benchmark and must not be read as evidence of real-world accuracy — see "Known
-  limitations" below and ADR 004 section 10/11.
+- **Not validated on real LLM traffic.** Both evaluators have been benchmarked offline on the
+  public WikiQA dataset (see "Offline validation (WikiQA)" below). That measures relevance
+  classification on one labeled dataset, not accuracy on any project's own spans. The small
+  labeled examples in `tests/test_relevance.py` only verify the evaluator *behaves as designed*
+  (score bounds, determinism, edge cases) — see "Known limitations" below and ADR 004 section 10/11.
 - **Not groundedness or faithfulness.** ADR 004 section 2 explains why those are blocked from V1;
   this package contains no code for either, not even disabled.
 - **Not LLM-as-judge.** No third-party model call exists anywhere in this package.
@@ -122,8 +123,9 @@ This is a genuine tradeoff, stated plainly:
 
 This is the honest reason this is a *foundation*: whether TF-IDF's lexical similarity is good enough,
 or whether the dependency cost of a real dense embedding model is worth paying for better accuracy, is
-exactly the question the offline validation harness (next milestone, ADR 004 section 10) is for. This
-package does not claim to have answered it.
+the question the offline WikiQA validation harness (ADR 004 section 10) was built to answer. Its
+TF-IDF report concluded that TF-IDF is useful as a baseline but not strong enough on its own (see
+"Offline validation (WikiQA)" below), which led to the embedding evaluator.
 
 ### Algorithm
 
@@ -142,12 +144,11 @@ rescaling.
   identical text.
 - **Label:** `"relevant"` if `score >= threshold`, else `"not_relevant"`; `"not_evaluable"` when no
   score could be computed at all.
-- **Threshold is a constructor argument with an explicitly unvalidated default
-  (`DEFAULT_THRESHOLD = 0.5`).** This number has not been checked against any labeled data. It is
-  configurable specifically *because* no offline validation has happened yet (ADR 004 section 10) —
-  the validation harness milestone is expected to determine a real threshold, or determine that a
-  single global threshold isn't the right mechanism at all. **This evaluator's output must not be
-  treated as accurate or calibrated until that validation exists.**
+- **Threshold is a constructor argument with a placeholder default (`DEFAULT_THRESHOLD = 0.5`).**
+  The default was not chosen from labeled data. The WikiQA harness selected `0.17` as the
+  F1-maximizing threshold on WikiQA's validation split, but that threshold has not been adopted as
+  the default, and a WikiQA-optimal threshold is not necessarily right for a project's own traffic.
+  **This evaluator's output must not be treated as calibrated for any particular project's data.**
 - **`evaluate()` also accepts an optional, keyword-only per-call `threshold`** (see `interface.py`'s
   `Evaluator.evaluate` docstring), which overrides the constructor's threshold for that one call
   only and never mutates the instance. This is how `services/worker` applies one
@@ -169,6 +170,45 @@ rescaling.
   — it never silently accepts a non-string value. `RelevanceEvaluator.evaluate()` separately rejects
   being called with anything that isn't a `RelevanceEvaluatorInput` at all, with the same exception
   type.
+
+## Offline validation (WikiQA)
+
+`validation/` is an offline benchmark harness for both evaluators, run against WikiQA (Microsoft
+Research's labeled question / candidate-answer-sentence pairs). The dataset is not committed (its
+license does not permit redistribution); `scripts/download_wikiqa.py` downloads it into a
+git-ignored local cache.
+
+**Protocol:** score every pair in the validation split (2,733 pairs), sweep 101 thresholds and
+select the one that maximizes F1, freeze it, then score the held-out test split (6,165 pairs,
+4.8% positive) once at that threshold. The train split is not used.
+
+**Held-out test results** (from `validation/reports/wikiqa_comparison.md`):
+
+| | TF-IDF (`relevance`) | Embedding (`relevance_embedding`) |
+| --- | --- | --- |
+| Threshold (selected on validation) | 0.17 | 0.89 |
+| Precision | 0.1061 | 0.3342 |
+| Recall | 0.4403 | 0.4232 |
+| F1 | 0.1710 | 0.3735 |
+| ROC-AUC | 0.6798 | 0.8220 |
+
+**How to read these:** the classes are heavily imbalanced, so accuracy is not reported. Both
+evaluators carry real signal (ROC-AUC above 0.5), and the embedding evaluator roughly doubles F1,
+mainly by cutting false positives (1,087 to 247) at similar recall. At these operating points most
+pairs labeled `relevant` are still wrong per WikiQA's labels (about 9 in 10 for TF-IDF, 2 in 3 for
+the embedding evaluator), and both reports conclude that neither is ready to be treated as an
+accurate production trust signal. These numbers describe WikiQA only; accuracy on real LLM traffic
+has not been measured.
+
+Full reports, including dataset statistics, failure analysis, and the embedding evaluator's
+latency cost: `validation/reports/wikiqa_baseline.md`, `wikiqa_embedding.md`, and
+`wikiqa_comparison.md`. To reproduce:
+
+```bash
+uv run python scripts/download_wikiqa.py      # network, one-time
+uv run python -m validation.wikiqa             # TF-IDF
+uv run python -m validation.wikiqa_embedding   # embedding (requires the `embedding` extra)
+```
 
 ## Tests (`tests/`)
 
@@ -351,9 +391,11 @@ uv run python -m validation.wikiqa_embedding
 
 - **Lexical, not semantic.** See "Dependency and model choice" above — a correct paraphrase can score
   low; keyword-stuffed irrelevant text can score misleadingly high.
-- **No benchmark validation.** The examples in this package's tests are illustrative, not a validation
-  suite. No precision/recall/F1 has been measured against any labeled dataset.
-- **Threshold is an unvalidated placeholder**, not a product decision.
+- **Offline benchmark only.** Precision/recall/F1/ROC-AUC have been measured on WikiQA (see
+  "Offline validation (WikiQA)" above), not on real LLM traffic. On WikiQA, TF-IDF's test precision
+  is 0.1061.
+- **Default threshold is a placeholder**, not a product decision; the WikiQA-selected threshold has
+  not been adopted as the default.
 - **No groundedness or faithfulness/hallucination detection.** Per ADR 004 section 2, this is a
   data-availability gap in Vigil's telemetry today (no reliable link between an LLM span and the
   retrieval context that fed it; retrieval span output isn't guaranteed to contain text at all; no
@@ -370,7 +412,8 @@ uv run python -m validation.wikiqa_embedding
   does not use or require retrieval context — this evaluator changes *how* relevance is measured,
   not *what* question it answers. Everything in "Known limitations" above about groundedness,
   faithfulness, and LLM-as-judge being out of scope applies identically here.
-- **Threshold is an unvalidated-until-the-harness-runs placeholder**, same posture as TF-IDF's.
+- **Default threshold is a placeholder**, same posture as TF-IDF's: WikiQA's validation split
+  selected `0.89`, but the code default remains `0.5`.
 - **Heavier runtime than TF-IDF.** Model load has real latency (dominated by the first `evaluate()`
   call's ONNX session initialization) and per-call inference is measurably slower than TF-IDF's
   closed-form arithmetic — see `validation/reports/wikiqa_comparison.md`'s "Inference cost" row for
