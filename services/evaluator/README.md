@@ -212,8 +212,12 @@ uv run python -m validation.wikiqa_embedding   # embedding (requires the `embedd
 
 ## Tests (`tests/`)
 
-35 tests, all passing, none touching the network, PostgreSQL, ClickHouse, Redis, or the dashboard —
-run with `uv run pytest`. Coverage includes: a valid relevant example, a clearly unrelated example
+112 tests across four files, run with `uv run pytest`. With only the base install (`uv sync`), 75
+run: `test_relevance.py` (32), `test_interface.py` (8) and `test_validation.py` (35), all passing,
+none touching the network, PostgreSQL, ClickHouse, Redis, or the dashboard. The 37 tests in
+`test_embedding_relevance.py` are skipped unless the `embedding` extra is installed, and need the
+model downloaded once (see "Two-phase network contract" below). TF-IDF evaluator coverage includes:
+a valid relevant example, a clearly unrelated example
 (zero shared vocabulary — mathematically guaranteed `score == 0.0`), identical input/output
 (mathematically guaranteed `score == 1.0`), every empty/whitespace-only input/output combination,
 punctuation/stop-word-only text, deterministic repeated evaluation, score-bounds checks across several
@@ -406,8 +410,10 @@ uv run python -m validation.wikiqa_embedding
 
 ### Known limitations — embedding relevance evaluator specifically
 
-- **Not the V1 production evaluator.** See `validation/reports/wikiqa_comparison.md` for whether
-  and how that should change.
+- **Supported, but opt-in per project.** Nothing enables it automatically: project onboarding
+  offers only the TF-IDF `relevance` evaluator, and `relevance_embedding` is enabled separately per
+  project under Evaluations. See `validation/reports/wikiqa_comparison.md` for the benchmark
+  comparison behind it.
 - **Answer-relevance only, same scope as TF-IDF.** Still does not check factual correctness, still
   does not use or require retrieval context — this evaluator changes *how* relevance is measured,
   not *what* question it answers. Everything in "Known limitations" above about groundedness,
