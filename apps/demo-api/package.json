@@ -1,0 +1,24 @@
+{
+  "name": "vigil-demo-api",
+  "private": true,
+  "type": "module",
+  "description": "Public Live Demo backend for Vigil: a Cloudflare Worker + D1 serving the dashboard's /v1 contract. See docs/decisions/009-public-demo-architecture.md.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply vigil-demo --local",
+    "db:migrate:remote": "wrangler d1 migrations apply vigil-demo --remote",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260928.1",
+    "@vitest/runner": "~4.1.11",
+    "@vitest/snapshot": "~4.1.11",
+    "typescript": "^5",
+    "vitest": "~4.1.11",
+    "wrangler": "^4.142.0"
+  }
+}

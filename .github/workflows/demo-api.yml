@@ -1,0 +1,36 @@
+name: Demo API
+
+# Test-only workflow for apps/demo-api, the public Live Demo backend
+# (docs/decisions/009-public-demo-architecture.md). Independent of ci.yml and
+# cd.yml; it never deploys. Runs when the demo API or the dashboard API types
+# it implements change.
+
+on:
+  push:
+    branches: [master]
+    paths: ["apps/demo-api/**", "apps/dashboard/lib/api/**", ".github/workflows/demo-api.yml"]
+  pull_request:
+    paths: ["apps/demo-api/**", "apps/dashboard/lib/api/**", ".github/workflows/demo-api.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Typecheck and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/demo-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/demo-api/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Bundle (no deploy)
+        run: npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/demo-api-bundle"

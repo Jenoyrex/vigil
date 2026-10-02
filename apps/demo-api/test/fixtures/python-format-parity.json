@@ -1,0 +1,156 @@
+{
+ "float_repr": [
+  {
+   "value": 0.0,
+   "repr": "0.0"
+  },
+  {
+   "value": -0.0,
+   "repr": "-0.0"
+  },
+  {
+   "value": 1.0,
+   "repr": "1.0"
+  },
+  {
+   "value": -2.5,
+   "repr": "-2.5"
+  },
+  {
+   "value": 0.1,
+   "repr": "0.1"
+  },
+  {
+   "value": 1e+16,
+   "repr": "1e+16"
+  },
+  {
+   "value": 1000000000000000.0,
+   "repr": "1000000000000000.0"
+  },
+  {
+   "value": 1e-05,
+   "repr": "1e-05"
+  },
+  {
+   "value": 0.0001,
+   "repr": "0.0001"
+  },
+  {
+   "value": 1.5e-07,
+   "repr": "1.5e-07"
+  },
+  {
+   "value": 123456789012345.6,
+   "repr": "123456789012345.6"
+  },
+  {
+   "value": 1.7976931348623157e+308,
+   "repr": "1.7976931348623157e+308"
+  },
+  {
+   "value": 5e-324,
+   "repr": "5e-324"
+  },
+  {
+   "value": 9007199254740992.0,
+   "repr": "9007199254740992.0"
+  },
+  {
+   "value": 0.30000000000000004,
+   "repr": "0.30000000000000004"
+  },
+  {
+   "value": 1e+22,
+   "repr": "1e+22"
+  },
+  {
+   "value": 100.0,
+   "repr": "100.0"
+  },
+  {
+   "value": 3.14159,
+   "repr": "3.14159"
+  },
+  {
+   "value": 1e+21,
+   "repr": "1e+21"
+  },
+  {
+   "value": 123456780000000.0,
+   "repr": "123456780000000.0"
+  }
+ ],
+ "json_dumps": [
+  {
+   "text": "{\"a\":1.0,\"b\":[1,2.50,-0,1E3,1e-7],\"c\":\"é\\n\\u0001\\\"\",\"d\":null,\"e\":true}",
+   "dumps": "{\"a\":1.0,\"b\":[1,2.5,0,1000.0,1e-07],\"c\":\"é\\n\\u0001\\\"\",\"d\":null,\"e\":true}"
+  },
+  {
+   "text": "[12345678901234567890, 0.1, -0.0, \"\\u2028\"]",
+   "dumps": "[12345678901234567890,0.1,-0.0,\" \"]"
+  },
+  {
+   "text": "\"plain string\"",
+   "dumps": "\"plain string\""
+  },
+  {
+   "text": "{\"nested\":{\"k\":[{},[]]}}",
+   "dumps": "{\"nested\":{\"k\":[{},[]]}}"
+  }
+ ],
+ "datetimes": [
+  {
+   "text": "2026-09-28T05:00:00Z",
+   "ms": 1790571600000,
+   "aware": true
+  },
+  {
+   "text": "2026-09-28T05:00:00.123456+05:30",
+   "ms": 1790551800123,
+   "aware": true
+  },
+  {
+   "text": "2026-09-28 05:00:00",
+   "ms": 1790571600000,
+   "aware": false
+  },
+  {
+   "text": "2026-09-28",
+   "ms": 1790553600000,
+   "aware": false
+  },
+  {
+   "text": "2026-09-28T05:00",
+   "ms": 1790571600000,
+   "aware": false
+  },
+  {
+   "text": "1790571601",
+   "ms": 1790571601000,
+   "aware": true
+  },
+  {
+   "text": "1790571601500",
+   "ms": 1790571601500,
+   "aware": true
+  },
+  {
+   "text": "bad",
+   "error": "Input should be a valid datetime or date, input is too short"
+  },
+  {
+   "text": "2026-02-30T00:00:00Z",
+   "error": "Input should be a valid datetime or date, day value is outside expected range"
+  },
+  {
+   "text": "2026-09-28T05:00:00.1234567Z",
+   "ms": 1790571600123,
+   "aware": true
+  },
+  {
+   "text": "2026-09-28T24:00:00Z",
+   "error": "Input should be a valid datetime or date, unexpected extra characters at the end of the input"
+  }
+ ]
+}
