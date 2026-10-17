@@ -16,7 +16,7 @@ dependencies = [
 # footprint (ONNX Runtime, tokenizers, huggingface-hub) is real and worth not forcing on every
 # install of this package.
 embedding = [
-    "fastembed>=0.8.0,<0.9.0",
+    "fastembed>=0.8.0,<0.10.0",
     "numpy>=1.26.0",
 ]
 
